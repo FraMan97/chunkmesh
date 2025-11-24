@@ -167,9 +167,9 @@ func (chunkmesh *chunkmesh) save() error {
 		Versions:  chunkmesh.Versions,
 	}
 
-	file, err := os.Create(filepath.Join(chunkmesh.Path, "chunkmesh.json"))
+	file, err := os.Create(filepath.Join(chunkmesh.Path, "chunkmesh_temp.json"))
 	if err != nil {
-		return fmt.Errorf("failed to create the 'chunkmesh.json' file")
+		return fmt.Errorf("failed to create the 'chunkmesh_temp.json' file")
 	}
 	defer file.Close()
 	content, err := json.Marshal(chunkmeshPersisted)
@@ -178,8 +178,14 @@ func (chunkmesh *chunkmesh) save() error {
 	}
 	_, err = file.Write(content)
 	if err != nil {
-		return fmt.Errorf("failed to write the 'chunkmesh.json' file")
+		return fmt.Errorf("failed to write the 'chunkmesh_temp.json' file")
 	}
+	err = os.Rename(filepath.Join(chunkmesh.Path, "chunkmesh_temp.json"), filepath.Join(chunkmesh.Path, "chunkmesh.json"))
+
+	if err != nil {
+		return fmt.Errorf("failed to rename 'chunkmesh_temp.json' file")
+	}
+
 	return nil
 }
 
