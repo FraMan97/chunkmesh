@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -46,52 +47,50 @@ func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
 func (chunkmesh *chunkmesh) AddByPath(name string, path string) (string, error) {
 	chunkmesh.Lock.Lock()
 	defer chunkmesh.Lock.Unlock()
-	content, err := os.ReadFile(path)
+
+	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to open the file '%s'", path)
 	}
-	newVersion, err := add(chunkmesh, name, content)
-	if err != nil {
-		return "", err
-	}
-	err = chunkmesh.save()
-	if err != nil {
-		return "", err
-	}
+	defer f.Close()
 
-	return newVersion, nil
+	newVersion, err := add(chunkmesh, name, f)
+	if err != nil {
+		return "", err
+	}
+	return newVersion, chunkmesh.save()
 }
 
 func (chunkmesh *chunkmesh) AddByInfo(name string, data []byte) (string, error) {
 	chunkmesh.Lock.Lock()
 	defer chunkmesh.Lock.Unlock()
-	newVersion, err := add(chunkmesh, name, data)
-	if err != nil {
-		return "", err
-	}
-	err = chunkmesh.save()
-	if err != nil {
-		return "", err
-	}
 
-	return newVersion, nil
+	r := bytes.NewReader(data)
+	newVersion, err := add(chunkmesh, name, r)
+	if err != nil {
+		return "", err
+	}
+	return newVersion, chunkmesh.save()
 }
 
-func add(chunkmesh *chunkmesh, name string, content []byte) (string, error) {
+func add(chunkmesh *chunkmesh, name string, reader io.Reader) (string, error) {
 	existingFile, ok := chunkmesh.Files[name]
 	versionId := uuid.New().String()
+
 	newFile := file{
 		Name:        name,
 		LastVersion: versionId,
 		Versions:    []string{versionId},
 	}
+
 	newVersion := version{
 		Id:          versionId,
 		FileName:    name,
-		Size:        len(content),
+		Size:        0,
 		Chunks:      []string{},
 		PrevVersion: "",
 	}
+
 	chunkmesh.Versions[versionId] = newVersion
 
 	if !ok {
@@ -103,48 +102,69 @@ func add(chunkmesh *chunkmesh, name string, content []byte) (string, error) {
 		chunkmesh.Files[name] = existingFile
 	}
 
-	chunks, paddings, err := splitFileIntoChunks(content, chunkmesh.ChunkSize)
-	if err != nil {
-		return "", err
-	}
-	for i, c := range chunks {
+	totalRead, err := ProcessChunks(reader, chunkmesh.ChunkSize, func(c []byte, padding int) error {
 		chunkId := generateHash(c)
 		existingChunk, ok := chunkmesh.Chunks[chunkId]
+
 		if !ok {
-			f, err := os.Create(filepath.Join(chunkmesh.Path, "chunks", chunkId+".chunk"))
+
+			dirPath := filepath.Join(chunkmesh.Path, "chunks", chunkId[:2], chunkId[2:4])
+
+			os.MkdirAll(dirPath, 0755)
+
+			chunkFilePath := filepath.Join(dirPath, chunkId+".chunk")
+
+			err := func() error {
+				f, err := os.Create(chunkFilePath)
+				if err != nil {
+					return fmt.Errorf("failed to create the chunk '%s' file", chunkId)
+				}
+				defer f.Close()
+
+				_, err = f.Write(c)
+				if err != nil {
+					return fmt.Errorf("failet to write the chunk '%s'", chunkId)
+				}
+				return nil
+			}()
+
 			if err != nil {
-				return "", fmt.Errorf("failed to create chunk '%s' file", chunkId)
-			}
-			defer f.Close()
-			_, err = f.Write(c)
-			if err != nil {
-				return "", fmt.Errorf("failed to write chunk '%s' file", chunkId)
+				return err
 			}
 
 			newChunk := chunk{
 				Id:                 chunkId,
-				Padding:            paddings[i],
+				Padding:            padding,
 				AssociatedVersions: []string{versionId},
 				RefCount:           1,
 			}
 			chunkmesh.Chunks[chunkId] = newChunk
+
 		} else {
 			existingChunk.RefCount++
-			existingChunk.AssociatedVersions = append(existingChunk.AssociatedVersions, newVersion.Id)
+			existingChunk.AssociatedVersions = append(existingChunk.AssociatedVersions, versionId)
 			chunkmesh.Chunks[chunkId] = existingChunk
 		}
+
 		newVersion.Chunks = append(newVersion.Chunks, chunkId)
+		return nil
+	})
+
+	if err != nil {
+		return "", err
 	}
+
+	newVersion.Size = totalRead
 	chunkmesh.Versions[newVersion.Id] = newVersion
 	return newVersion.Id, nil
 }
 
 func (chunkmesh *chunkmesh) save() error {
 	chunkmeshPersisted := chunkmeshPersisted{
-		ChunckSize: chunkmesh.ChunkSize,
-		Files:      chunkmesh.Files,
-		Chunks:     chunkmesh.Chunks,
-		Versions:   chunkmesh.Versions,
+		ChunkSize: chunkmesh.ChunkSize,
+		Files:     chunkmesh.Files,
+		Chunks:    chunkmesh.Chunks,
+		Versions:  chunkmesh.Versions,
 	}
 
 	file, err := os.Create(filepath.Join(chunkmesh.Path, "chunkmesh.json"))
@@ -196,7 +216,7 @@ func deleteVersion(chunkmesh *chunkmesh, name string, versionId string) error {
 		chunk.RefCount--
 
 		if chunk.RefCount <= 0 {
-			chunkFilePath := filepath.Join(chunkmesh.Path, "chunks", chunk.Id+".chunk")
+			chunkFilePath := filepath.Join(chunkmesh.Path, "chunks", chunk.Id[:2], chunk.Id[2:4], chunk.Id+".chunk")
 			if err := os.Remove(chunkFilePath); err != nil {
 				return fmt.Errorf("failed to delete the chunk file '%s': %w", chunk.Id, err)
 			}
@@ -227,6 +247,63 @@ func deleteVersion(chunkmesh *chunkmesh, name string, versionId string) error {
 	delete(chunkmesh.Versions, idVersion)
 
 	return nil
+}
+
+func (chunkmesh *chunkmesh) Get(name string, version string) ([]byte, error) {
+	chunkmesh.Lock.Lock()
+	defer chunkmesh.Lock.Unlock()
+
+	existingFile, ok := chunkmesh.Files[name]
+	if !ok {
+		return nil, fmt.Errorf("failed to find the file %s", name)
+	}
+
+	var versionID string
+	if version == "latest" {
+		versionID = existingFile.LastVersion
+	} else {
+		versionID = version
+	}
+
+	targetVersion, ok := chunkmesh.Versions[versionID]
+	if !ok {
+		return nil, fmt.Errorf("failed to find the version '%s'", versionID)
+	}
+
+	resultedFile := make([]byte, 0, targetVersion.Size)
+
+	for _, chunkID := range targetVersion.Chunks {
+		chunkInfo, ok := chunkmesh.Chunks[chunkID]
+		if !ok {
+			return nil, fmt.Errorf("metadata corruption: chunk '%s' not found", chunkID)
+		}
+
+		chunkPath := filepath.Join(chunkmesh.Path, "chunks", chunkID[:2], chunkID[2:4], chunkID+".chunk")
+
+		chunkBytes, err := func() ([]byte, error) {
+			f, err := os.Open(chunkPath)
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+
+			return io.ReadAll(f)
+		}()
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to read chunk '%s': %w", chunkID, err)
+		}
+
+		if chunkInfo.Padding > 0 {
+			if len(chunkBytes) > chunkInfo.Padding {
+				chunkBytes = chunkBytes[:len(chunkBytes)-chunkInfo.Padding]
+			}
+		}
+
+		resultedFile = append(resultedFile, chunkBytes...)
+	}
+
+	return resultedFile, nil
 }
 
 func (chunkmesh *chunkmesh) Delete(name string, versionId string) error {

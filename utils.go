@@ -1,10 +1,9 @@
 package chunkmesh
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"math"
+	"io"
 )
 
 func generateHash(data []byte) string {
@@ -14,37 +13,35 @@ func generateHash(data []byte) string {
 	return hex.EncodeToString(hash)
 }
 
-func splitFileIntoChunks(file []byte, sizeChunk int) ([][]byte, []int, error) {
-	fileSize := len(file)
-	if fileSize == 0 {
-		return [][]byte{}, []int{}, nil
-	}
+func ProcessChunks(r io.Reader, chunkSize int, handler func(chunk []byte, padding int) error) (int, error) {
+	buf := make([]byte, chunkSize)
+	totalSize := 0
 
-	numChunks := int(math.Ceil(float64(fileSize) / float64(sizeChunk)))
+	for {
+		n, err := io.ReadFull(r, buf)
+		if n > 0 {
+			totalSize += n
+			currentPadding := 0
 
-	chunks := make([][]byte, 0, numChunks)
-	paddings := make([]int, 0, numChunks)
+			chunkData := buf[:n]
+			if n < chunkSize {
+				currentPadding = chunkSize - n
+				paddedChunk := make([]byte, chunkSize)
+				copy(paddedChunk, chunkData)
+				chunkData = paddedChunk
+			}
 
-	for i := 0; i < numChunks; i++ {
-		start := i * sizeChunk
-		end := start + sizeChunk
-
-		if end > fileSize {
-			end = fileSize
+			if err := handler(chunkData, currentPadding); err != nil {
+				return totalSize, err
+			}
 		}
 
-		currentChunk := file[start:end]
-		currentPadding := 0
-
-		if i == numChunks-1 && len(currentChunk) < sizeChunk {
-			currentPadding = sizeChunk - len(currentChunk)
-			paddingBytes := bytes.Repeat([]byte{0x00}, currentPadding)
-			currentChunk = append(currentChunk, paddingBytes...)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
 		}
-
-		chunks = append(chunks, currentChunk)
-		paddings = append(paddings, currentPadding)
+		if err != nil {
+			return totalSize, err
+		}
 	}
-
-	return chunks, paddings, nil
+	return totalSize, nil
 }
