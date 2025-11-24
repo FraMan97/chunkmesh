@@ -171,7 +171,6 @@ func (chunkmesh *chunkmesh) save() error {
 	if err != nil {
 		return fmt.Errorf("failed to create the 'chunkmesh_temp.json' file")
 	}
-	defer file.Close()
 	content, err := json.Marshal(chunkmeshPersisted)
 	if err != nil {
 		return fmt.Errorf("failed to serialize 'chunkmesh' object")
@@ -180,6 +179,8 @@ func (chunkmesh *chunkmesh) save() error {
 	if err != nil {
 		return fmt.Errorf("failed to write the 'chunkmesh_temp.json' file")
 	}
+
+	file.Close()
 	err = os.Rename(filepath.Join(chunkmesh.Path, "chunkmesh_temp.json"), filepath.Join(chunkmesh.Path, "chunkmesh.json"))
 
 	if err != nil {
