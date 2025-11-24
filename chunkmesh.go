@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -44,7 +45,7 @@ func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
 	return &chunkmesh, nil
 }
 
-func (chunkmesh *chunkmesh) AddByPath(name string, path string) (string, error) {
+func (chunkmesh *chunkmesh) AddByPath(name string, path string, compress bool) (string, error) {
 	chunkmesh.Lock.Lock()
 	defer chunkmesh.Lock.Unlock()
 
@@ -54,26 +55,26 @@ func (chunkmesh *chunkmesh) AddByPath(name string, path string) (string, error) 
 	}
 	defer f.Close()
 
-	newVersion, err := add(chunkmesh, name, f)
+	newVersion, err := add(chunkmesh, name, compress, f)
 	if err != nil {
 		return "", err
 	}
 	return newVersion, chunkmesh.save()
 }
 
-func (chunkmesh *chunkmesh) AddByInfo(name string, data []byte) (string, error) {
+func (chunkmesh *chunkmesh) AddByInfo(name string, data []byte, compress bool) (string, error) {
 	chunkmesh.Lock.Lock()
 	defer chunkmesh.Lock.Unlock()
 
 	r := bytes.NewReader(data)
-	newVersion, err := add(chunkmesh, name, r)
+	newVersion, err := add(chunkmesh, name, compress, r)
 	if err != nil {
 		return "", err
 	}
 	return newVersion, chunkmesh.save()
 }
 
-func add(chunkmesh *chunkmesh, name string, reader io.Reader) (string, error) {
+func add(chunkmesh *chunkmesh, name string, compression bool, reader io.Reader) (string, error) {
 	existingFile, ok := chunkmesh.Files[name]
 	versionId := uuid.New().String()
 
@@ -102,7 +103,7 @@ func add(chunkmesh *chunkmesh, name string, reader io.Reader) (string, error) {
 		chunkmesh.Files[name] = existingFile
 	}
 
-	totalRead, err := ProcessChunks(reader, chunkmesh.ChunkSize, func(c []byte, padding int) error {
+	totalRead, err := processChunks(reader, chunkmesh.ChunkSize, compression, func(c []byte) error {
 		chunkId := generateHash(c)
 		existingChunk, ok := chunkmesh.Chunks[chunkId]
 
@@ -123,7 +124,7 @@ func add(chunkmesh *chunkmesh, name string, reader io.Reader) (string, error) {
 
 				_, err = f.Write(c)
 				if err != nil {
-					return fmt.Errorf("failet to write the chunk '%s'", chunkId)
+					return fmt.Errorf("failed to write the chunk '%s'", chunkId)
 				}
 				return nil
 			}()
@@ -133,16 +134,14 @@ func add(chunkmesh *chunkmesh, name string, reader io.Reader) (string, error) {
 			}
 
 			newChunk := chunk{
-				Id:                 chunkId,
-				Padding:            padding,
-				AssociatedVersions: []string{versionId},
-				RefCount:           1,
+				Id:          chunkId,
+				Compression: compression,
+				RefCount:    1,
 			}
 			chunkmesh.Chunks[chunkId] = newChunk
 
 		} else {
 			existingChunk.RefCount++
-			existingChunk.AssociatedVersions = append(existingChunk.AssociatedVersions, versionId)
 			chunkmesh.Chunks[chunkId] = existingChunk
 		}
 
@@ -280,7 +279,7 @@ func (chunkmesh *chunkmesh) Get(name string, version string) ([]byte, error) {
 	resultedFile := make([]byte, 0, targetVersion.Size)
 
 	for _, chunkID := range targetVersion.Chunks {
-		chunkInfo, ok := chunkmesh.Chunks[chunkID]
+		_, ok := chunkmesh.Chunks[chunkID]
 		if !ok {
 			return nil, fmt.Errorf("metadata corruption: chunk '%s' not found", chunkID)
 		}
@@ -290,7 +289,7 @@ func (chunkmesh *chunkmesh) Get(name string, version string) ([]byte, error) {
 		chunkBytes, err := func() ([]byte, error) {
 			f, err := os.Open(chunkPath)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to open the chunk '%s' file", chunkPath)
 			}
 			defer f.Close()
 
@@ -298,15 +297,18 @@ func (chunkmesh *chunkmesh) Get(name string, version string) ([]byte, error) {
 		}()
 
 		if err != nil {
-			return nil, fmt.Errorf("failed to read chunk '%s': %w", chunkID, err)
+			return nil, err
 		}
 
-		if chunkInfo.Padding > 0 {
-			if len(chunkBytes) > chunkInfo.Padding {
-				chunkBytes = chunkBytes[:len(chunkBytes)-chunkInfo.Padding]
+		if chunkID != generateHash(chunkBytes) {
+			return nil, fmt.Errorf("integrity check failed: probably chunk '%s'.chunk is corrupted", chunkID)
+		}
+		if chunkmesh.Chunks[chunkID].Compression {
+			chunkBytes, err = decompress(chunkBytes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decompress the chunk '%s' file", chunkID)
 			}
 		}
-
 		resultedFile = append(resultedFile, chunkBytes...)
 	}
 
@@ -325,4 +327,41 @@ func (chunkmesh *chunkmesh) Delete(name string, versionId string) error {
 		return err
 	}
 	return nil
+}
+
+func (chunkmesh *chunkmesh) CleanOrphanChunks() {
+	chunkmesh.Lock.Lock()
+	defer chunkmesh.Lock.Unlock()
+	list := listFiles(filepath.Join(chunkmesh.Path, "chunks"))
+
+	for _, f := range list {
+		fileNameWithExtension := filepath.Base(f)
+		fileName := strings.Split(fileNameWithExtension, ".")
+		if len(fileName) != 2 {
+			err := os.Remove(f)
+			if err != nil {
+				continue
+			}
+		} else {
+			var fileName = fileName[0]
+			c, ok := chunkmesh.Chunks[fileName]
+			if !ok {
+				err := os.Remove(f)
+				if err != nil {
+					continue
+				}
+
+			} else {
+				if c.RefCount <= 0 {
+					err := os.Remove(f)
+					if err != nil {
+						continue
+					}
+					delete(chunkmesh.Chunks, fileName)
+				}
+				continue
+			}
+		}
+
+	}
 }
