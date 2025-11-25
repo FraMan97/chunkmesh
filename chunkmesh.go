@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -15,7 +16,7 @@ import (
 
 type chunkmesh struct {
 	Path      string
-	Lock      *sync.Mutex
+	Lock      *sync.RWMutex
 	ChunkSize int
 	Files     map[string]file
 	Chunks    map[string]chunk
@@ -28,7 +29,7 @@ func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
 	filePath := filepath.Join(path, "chunkmesh.json")
 	chunkmesh := chunkmesh{
 		Path:      path,
-		Lock:      &sync.Mutex{},
+		Lock:      &sync.RWMutex{},
 		ChunkSize: chunkSize,
 		Files:     make(map[string]file),
 		Chunks:    make(map[string]chunk),
@@ -103,16 +104,22 @@ func add(chunkmesh *chunkmesh, name string, compression bool, reader io.Reader) 
 		chunkmesh.Files[name] = existingFile
 	}
 
-	totalRead, err := processChunks(reader, chunkmesh.ChunkSize, compression, func(c []byte) error {
+	var mu sync.Mutex
+
+	tempChunks := make(map[int]string)
+
+	totalRead, err := processChunks(reader, chunkmesh.ChunkSize, compression, runtime.NumCPU(), func(index int, c []byte) error {
 		chunkId := generateHash(c)
+
+		mu.Lock()
+		defer mu.Unlock()
+
 		existingChunk, ok := chunkmesh.Chunks[chunkId]
 
 		if !ok {
 
 			dirPath := filepath.Join(chunkmesh.Path, "chunks", chunkId[:2], chunkId[2:4])
-
 			os.MkdirAll(dirPath, 0755)
-
 			chunkFilePath := filepath.Join(dirPath, chunkId+".chunk")
 
 			err := func() error {
@@ -121,12 +128,8 @@ func add(chunkmesh *chunkmesh, name string, compression bool, reader io.Reader) 
 					return fmt.Errorf("failed to create the chunk '%s' file", chunkId)
 				}
 				defer f.Close()
-
 				_, err = f.Write(c)
-				if err != nil {
-					return fmt.Errorf("failed to write the chunk '%s'", chunkId)
-				}
-				return nil
+				return err
 			}()
 
 			if err != nil {
@@ -145,12 +148,22 @@ func add(chunkmesh *chunkmesh, name string, compression bool, reader io.Reader) 
 			chunkmesh.Chunks[chunkId] = existingChunk
 		}
 
-		newVersion.Chunks = append(newVersion.Chunks, chunkId)
+		tempChunks[index] = chunkId
+
 		return nil
 	})
 
 	if err != nil {
 		return "", err
+	}
+
+	newVersion.Chunks = make([]string, len(tempChunks))
+	for i := 0; i < len(tempChunks); i++ {
+		if id, ok := tempChunks[i]; ok {
+			newVersion.Chunks[i] = id
+		} else {
+			return "", fmt.Errorf("missing chunk index %d during processing", i)
+		}
 	}
 
 	newVersion.Size = totalRead
@@ -256,8 +269,8 @@ func deleteVersion(chunkmesh *chunkmesh, name string, versionId string) error {
 }
 
 func (chunkmesh *chunkmesh) Get(name string, version string) ([]byte, error) {
-	chunkmesh.Lock.Lock()
-	defer chunkmesh.Lock.Unlock()
+	chunkmesh.Lock.RLock()
+	defer chunkmesh.Lock.RUnlock()
 
 	existingFile, ok := chunkmesh.Files[name]
 	if !ok {
@@ -330,38 +343,54 @@ func (chunkmesh *chunkmesh) Delete(name string, versionId string) error {
 }
 
 func (chunkmesh *chunkmesh) CleanOrphanChunks() {
-	chunkmesh.Lock.Lock()
-	defer chunkmesh.Lock.Unlock()
 	list := listFiles(filepath.Join(chunkmesh.Path, "chunks"))
 
+	var filesToDelete []string
+
+	chunkmesh.Lock.Lock()
 	for _, f := range list {
 		fileNameWithExtension := filepath.Base(f)
-		fileName := strings.Split(fileNameWithExtension, ".")
-		if len(fileName) != 2 {
-			err := os.Remove(f)
-			if err != nil {
-				continue
-			}
-		} else {
-			var fileName = fileName[0]
-			c, ok := chunkmesh.Chunks[fileName]
-			if !ok {
-				err := os.Remove(f)
-				if err != nil {
-					continue
-				}
+		parts := strings.Split(fileNameWithExtension, ".")
 
-			} else {
-				if c.RefCount <= 0 {
-					err := os.Remove(f)
-					if err != nil {
-						continue
-					}
-					delete(chunkmesh.Chunks, fileName)
-				}
-				continue
-			}
+		if len(parts) != 2 {
+			filesToDelete = append(filesToDelete, f)
+			continue
 		}
 
+		fileName := parts[0]
+		c, ok := chunkmesh.Chunks[fileName]
+
+		if !ok {
+			filesToDelete = append(filesToDelete, f)
+		} else {
+			if c.RefCount <= 0 {
+				filesToDelete = append(filesToDelete, f)
+				delete(chunkmesh.Chunks, fileName)
+			}
+		}
 	}
+	chunkmesh.Lock.Unlock()
+
+	if len(filesToDelete) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	maxConcurrency := runtime.NumCPU()
+	sem := make(chan struct{}, maxConcurrency)
+
+	for _, f := range filesToDelete {
+		wg.Add(1)
+		go func(filePath string) {
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
+
+			_ = os.Remove(filePath)
+		}(f)
+	}
+
+	wg.Wait()
 }

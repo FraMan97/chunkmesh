@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -18,24 +19,60 @@ func generateHash(data []byte) string {
 	return hex.EncodeToString(hash)
 }
 
-func processChunks(r io.Reader, chunkSize int, compression bool, handler func(chunk []byte) error) (int, error) {
-	buf := make([]byte, chunkSize)
+func processChunks(r io.Reader, chunkSize int, compression bool, maxConcurrency int, handler func(chunkIndex int, chunk []byte) error) (int, error) {
+	var wg sync.WaitGroup
 	totalSize := 0
 
+	errChan := make(chan error, 1)
+	sem := make(chan struct{}, maxConcurrency)
+
+	chunkIndex := 0
+
 	for {
+		select {
+		case err := <-errChan:
+			return totalSize, err
+		default:
+		}
+
+		buf := make([]byte, chunkSize)
 		n, err := io.ReadFull(r, buf)
+
 		if n > 0 {
 			totalSize += n
 			chunkData := buf[:n]
-			if compression {
-				chunkData, err = compress(chunkData)
-				if err != nil {
-					return totalSize, err
+
+			sem <- struct{}{}
+			wg.Add(1)
+
+			go func(idx int, data []byte) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+
+				if len(errChan) > 0 {
+					return
 				}
-			}
-			if err := handler(chunkData); err != nil {
-				return totalSize, err
-			}
+
+				var e error
+				if compression {
+					data, e = compress(data)
+				}
+
+				if e == nil {
+					e = handler(idx, data)
+				}
+
+				if e != nil {
+					select {
+					case errChan <- e:
+					default:
+					}
+				}
+			}(chunkIndex, chunkData)
+
+			chunkIndex++
 		}
 
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -45,6 +82,15 @@ func processChunks(r io.Reader, chunkSize int, compression bool, handler func(ch
 			return totalSize, err
 		}
 	}
+
+	wg.Wait()
+	close(errChan)
+	close(sem)
+
+	if err := <-errChan; err != nil {
+		return totalSize, err
+	}
+
 	return totalSize, nil
 }
 
