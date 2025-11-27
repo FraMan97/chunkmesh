@@ -1,5 +1,5 @@
 # chunkmesh
-`chunkesh` is a lightweight, local file storage system designed to offer efficient, resilient and versioned archiving through chunk-level data deduplication. This project optimizes storage space by eliminating data redundancy and providing granular control over file modifications over time.
+`chunkmesh` is a lightweight, local file storage system designed to offer efficient, resilient and versioned archiving through chunk-level data deduplication. This project optimizes storage space by eliminating data redundancy and providing granular control over file modifications over time.
 
 > [!WARNING]
 > This project is currently a Proof of Concept (POC) and is not suitable for a production environment. It is intended for developer use only.
@@ -25,7 +25,7 @@
 * **Stream-Based Processing**: Built on Go's `io.Reader` interfaces, `chunkmesh` processes files of any size (GBs or TBs) using a constant, minimal amount of RAM.
 * **Optimized File Layout (Sharding)**: Chunks are stored using a directory sharding strategy (e.g., `chunks/ab/cd/...`) to prevent filesystem performance degradation.
 * **Automatic Versioning**: Every addition or modification creates a new version, maintaining a complete history of changes.
-* **Atomic State Management**: Operations are protected by locking mechanisms to ensure data consistency.
+* **Atomic State Management**: Operations are protected by locking mechanisms and ACID database transactions to ensure data consistency.
 * **Intelligent Deletion**: A reference counting system (`ref_count`) ensures chunks are deleted only when no active version references them.
 
 ---
@@ -33,9 +33,9 @@
 ## Technology Stack
 
 * **Core Language**: Go (Golang)
-* **Database**: Local file-based system:
-    * `chunkmesh.json`: Stores metadata, file registry and version history.
-    * `chunks/`: Stores the deduplicated (and optionally compressed) binary content.
+* **Database**: Embedded Key/Value store (BoltDB):
+    * `boltdb.db`: Stores metadata, file registry, chunk references and version history using efficient, transactional B+ trees.
+    * `chunks/`: Stores the deduplicated (and optionally compressed) binary content on the filesystem.
 
 ---
 
@@ -43,18 +43,21 @@
 
 > [!NOTE]
 > ### Prerequisites
-> * Go (v 1.22 or later)
+> * Go (v 1.24 or later)
 
 ### 1. How to Use
 
 **Initialization**
 
 ```go
-import "github.com/FraMan97/chunkmesh"
+import "github.com/FraMan97/chunkmesh/src/core"
 
-storage, err := chunkmesh.NewChunkMeshStorage(
+// Use a larger chunk size (e.g., 4MB) for better performance on large files
+const MB = 1024 * 1024
+
+storage, err := core.NewChunkMeshStorage(
     "/data/my_storage", // Path to local folder
-    4096,               // Chunk size (e.g., 4KB)
+    4 * MB,             // Chunk size
 )
 if err != nil { /* handle error */ }
 ```
@@ -105,6 +108,14 @@ if err != nil { /* handle error */ }
 
 // clean corrupted chunks
 storage.CleanOrphanChunks()
+```
+
+**Get latest file version**
+
+```go
+
+latest, err := storage.GetLatestVersion("file.txt")
+if err != nil { /* handle error */ }
 ```
 ---
 
