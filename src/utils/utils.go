@@ -1,4 +1,4 @@
-package chunkmesh
+package utils
 
 import (
 	"bytes"
@@ -12,14 +12,14 @@ import (
 	"time"
 )
 
-func generateHash(data []byte) string {
+func GenerateHash(data []byte) string {
 	sha := sha256.New()
 	sha.Write(data)
 	hash := sha.Sum(nil)
 	return hex.EncodeToString(hash)
 }
 
-func processChunks(r io.Reader, chunkSize int, compression bool, maxConcurrency int, handler func(chunkIndex int, chunk []byte) error) (int, error) {
+func ProcessChunks(r io.Reader, chunkSize int, compression bool, maxConcurrency int, handler func(chunkIndex int, chunk []byte) error) (int, error) {
 	var wg sync.WaitGroup
 	totalSize := 0
 
@@ -57,7 +57,7 @@ func processChunks(r io.Reader, chunkSize int, compression bool, maxConcurrency 
 
 				var e error
 				if compression {
-					data, e = compress(data)
+					data, e = Compress(data)
 				}
 
 				if e == nil {
@@ -94,7 +94,7 @@ func processChunks(r io.Reader, chunkSize int, compression bool, maxConcurrency 
 	return totalSize, nil
 }
 
-func listFiles(dir string) []string {
+func ListFiles(dir string) []string {
 	var files []string
 
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -110,7 +110,7 @@ func listFiles(dir string) []string {
 	return files
 }
 
-func compress(data []byte) ([]byte, error) {
+func Compress(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	w, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
@@ -130,7 +130,7 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func decompress(data []byte) ([]byte, error) {
+func Decompress(data []byte) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err

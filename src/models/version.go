@@ -1,6 +1,6 @@
-package chunkmesh
+package models
 
-type version struct {
+type Version struct {
 	Id          string   `json:"id"`
 	FileName    string   `json:"file_name"`
 	Size        int      `json:"size"`

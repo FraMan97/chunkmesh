@@ -1,6 +1,6 @@
-package chunkmesh
+package models
 
-type chunk struct {
+type Chunk struct {
 	Id          string `json:"id"`
 	Compression bool   `json:"compression"`
 	RefCount    int    `json:"ref_count"`
