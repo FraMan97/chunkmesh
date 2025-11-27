@@ -20,13 +20,13 @@
 ## Key Features
 
 * **Chunk-Level Deduplication**: Files are split into fixed-size blocks (chunks). Only unique chunks are physically stored, while duplicate files or versions referencing existing chunks simply point to the stored data.
-* **Smart Compression**: Supports optional GZIP compression (Best Compression level) for chunks. This works in tandem with deduplication to maximize storage efficiency.
-* **Data Integrity Assurance**: Automatically performs SHA-256 integrity checks during file retrieval (`Get`) to detect and prevent silent data corruption.
+* **Efficient Compression**: Uses standard GZIP compression (`gzip.DefaultCompression`) to balance speed and storage efficiency.
+* **Data Integrity Assurance**: Automatically performs SHA-256 integrity checks during file retrieval (`Get`) to detect and prevent silent data corruption immediately upon access.
+* **Retention Policy**: Supports optional Time-to-Live (TTL) for files. Versions older than the specified retention period are automatically purged during cleanup.
 * **Stream-Based Processing**: Built on Go's `io.Reader` interfaces, `chunkmesh` processes files of any size (GBs or TBs) using a constant, minimal amount of RAM.
 * **Optimized File Layout (Sharding)**: Chunks are stored using a directory sharding strategy (e.g., `chunks/ab/cd/...`) to prevent filesystem performance degradation.
-* **Automatic Versioning**: Every addition or modification creates a new version, maintaining a complete history of changes.
-* **Atomic State Management**: Operations are protected by locking mechanisms and ACID database transactions to ensure data consistency.
-* **Intelligent Deletion**: A reference counting system (`ref_count`) ensures chunks are deleted only when no active version references them.
+* **Atomic-like State Management**: Operations are protected by locking mechanisms and transactional metadata updates.
+* **Intelligent Garbage Collection**: A comprehensive clean-up mechanism removes orphan chunks, expired versions, corrupted versions (through SHA-256 integrity checks of version chunks) and empty directories.
 
 ---
 
@@ -66,26 +66,28 @@ if err != nil { /* handle error */ }
 
 ```go
 
-// add file (version) by local path
+// Add file (version) by local path
 err := storage.AddByPath(
-    "file.txt", //File name. Include the extension for logical grouping
+    "file.txt", // File name. Include the extension for logical grouping
     "path/to/file.txt", // Full local path to the file.
-    true, // enable best compression with gzip
+    true, // Enable default compression with gzip
+    3600, // Retention Policy in seconds. '0' means no future deletion
 )
 if err != nil { /* handle error */ }
 
-// add file (version) by []byte content
+// Add file (version) by []byte content
 err = storage.AddByInfo(
-    "file.txt", //file name. Include the extension
-    content, //file content in []byte
-    true, // enable best compression with gzip
+    "file.txt", // File name. Include the extension for logical grouping
+    content, // File content in []byte
+    true, // Enable default compression with gzip
+    3600, // Retention Policy in seconds. '0' means no future deletion
 )
 if err != nil { /* handle error */ }
 
-// delete file (version)
+// Delete file (version)
 err = storage.Delete(
-    "file.txt", //File name. Include the extension for logical grouping
-    "anshd...", //Version id to delete or use "latest" for the most recent version
+    "file.txt", // File name. Include the extension for logical grouping
+    "anshd...", // Version id to delete or use "latest" for the most recent version
 )
 if err != nil { /* handle error */ }
 ```
@@ -94,7 +96,7 @@ if err != nil { /* handle error */ }
 
 ```go
 
-// get file (version)
+// Get file (version)
 content, err := storage.Get(
     "file.txt", //File name. Include the extension for logical grouping
     "anshd...", //Version id to get or use "latest" for the most recent version
@@ -102,19 +104,21 @@ content, err := storage.Get(
 if err != nil { /* handle error */ }
 ```
 
-**Delete corrupted chunks file**
+**Clean database**
 
 ```go
 
-// clean corrupted chunks
-storage.CleanOrphanChunks()
+// Clean orphan chunks, corrupted versions, expired versions and empty directories
+storage.CleanUp()
 ```
 
 **Get latest file version**
 
 ```go
 
-latest, err := storage.GetLatestVersion("file.txt")
+latest, err := storage.GetLatestVersion(
+    "file.txt", //File name. Include the extension for logical grouping
+)
 if err != nil { /* handle error */ }
 ```
 ---
@@ -122,3 +126,5 @@ if err != nil { /* handle error */ }
 
 
 ## Roadmap
+
+* Add AES Encryption for chunks

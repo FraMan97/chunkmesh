@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/FraMan97/chunkmesh/src/database"
 	"github.com/FraMan97/chunkmesh/src/models"
@@ -58,7 +59,7 @@ func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
 	return &cm, nil
 }
 
-func (cm *chunkmesh) AddByPath(name string, path string, compress bool) (string, error) {
+func (cm *chunkmesh) AddByPath(name string, path string, compress bool, retention int) (string, error) {
 	cm.Lock.Lock()
 	defer cm.Lock.Unlock()
 
@@ -68,18 +69,18 @@ func (cm *chunkmesh) AddByPath(name string, path string, compress bool) (string,
 	}
 	defer f.Close()
 
-	return add(cm, name, compress, f)
+	return add(cm, name, compress, retention, f)
 }
 
-func (cm *chunkmesh) AddByInfo(name string, data []byte, compress bool) (string, error) {
+func (cm *chunkmesh) AddByInfo(name string, data []byte, compress bool, retention int) (string, error) {
 	cm.Lock.Lock()
 	defer cm.Lock.Unlock()
 
 	r := bytes.NewReader(data)
-	return add(cm, name, compress, r)
+	return add(cm, name, compress, retention, r)
 }
 
-func add(cm *chunkmesh, name string, compression bool, reader io.Reader) (string, error) {
+func add(cm *chunkmesh, name string, compression bool, retention int, reader io.Reader) (string, error) {
 	var currentFile models.File
 	fileData, err := database.GetData(cm.BoltDB, BucketFiles, name)
 
@@ -101,6 +102,8 @@ func add(cm *chunkmesh, name string, compression bool, reader io.Reader) (string
 
 	newVersion := models.Version{
 		Id:          versionId,
+		Retention:   retention,
+		CreatedAt:   time.Now().UTC(),
 		FileName:    name,
 		Size:        0,
 		Chunks:      []string{},
@@ -254,13 +257,137 @@ func (cm *chunkmesh) Get(name string, versionIdRequested string) ([]byte, error)
 	return resultedFile, nil
 }
 
+func (cm *chunkmesh) CleanUp() {
+	cm.Lock.Lock()
+	defer cm.Lock.Unlock()
+
+	cm.cleanOrphanChunksUnsafe()
+	cm.cleanCorruptedVersionsUnsafe()
+	cm.cleanExpiredVersionsUnsafe()
+	cm.pruneEmptyDirectoriesUnsafe()
+}
+
 func (cm *chunkmesh) Delete(name string, versionId string) error {
 	cm.Lock.Lock()
 	defer cm.Lock.Unlock()
-	return DeleteVersion(cm, name, versionId)
+	return cm.deleteVersionUnsafe(name, versionId)
 }
 
-func DeleteVersion(cm *chunkmesh, name string, versionId string) error {
+func (cm *chunkmesh) cleanOrphanChunksUnsafe() {
+	physicalFiles := utils.ListFiles(filepath.Join(cm.Path, "chunks"))
+
+	for _, fPath := range physicalFiles {
+		fileNameWithExt := filepath.Base(fPath)
+		parts := strings.Split(fileNameWithExt, ".")
+		if len(parts) != 2 {
+			os.Remove(fPath)
+			continue
+		}
+		chunkID := parts[0]
+
+		exists, _ := database.ExistsKey(cm.BoltDB, BucketChunks, chunkID)
+		if !exists {
+			os.Remove(fPath)
+		} else {
+			cData, _ := database.GetData(cm.BoltDB, BucketChunks, chunkID)
+			var c models.Chunk
+			json.Unmarshal(cData, &c)
+			if c.RefCount <= 0 {
+				os.Remove(fPath)
+				database.DeleteKey(cm.BoltDB, BucketChunks, chunkID)
+			}
+		}
+	}
+}
+
+func (cm *chunkmesh) cleanCorruptedVersionsUnsafe() {
+	vData, err := database.GetAllData(cm.BoltDB, BucketVersions)
+	if err != nil {
+		return
+	}
+
+	for _, dataBytes := range vData {
+		var v models.Version
+		if err := json.Unmarshal(dataBytes, &v); err != nil {
+			continue
+		}
+		corrupted := false
+
+		for _, chunkID := range v.Chunks {
+			chunkPath := filepath.Join(cm.Path, "chunks", chunkID[:2], chunkID[2:4], chunkID+".chunk")
+			file, err := os.ReadFile(chunkPath)
+			if err != nil {
+				corrupted = true
+				break
+			}
+			hash := utils.GenerateHash(file)
+			if hash != chunkID {
+				corrupted = true
+				break
+			}
+		}
+
+		if corrupted {
+			cm.deleteVersionUnsafe(v.FileName, v.Id)
+		}
+	}
+}
+
+func (cm *chunkmesh) cleanExpiredVersionsUnsafe() {
+	vData, err := database.GetAllData(cm.BoltDB, BucketVersions)
+	if err != nil {
+		return
+	}
+
+	now := time.Now().UTC()
+
+	for _, dataBytes := range vData {
+		var v models.Version
+		if err := json.Unmarshal(dataBytes, &v); err != nil {
+			continue
+		}
+
+		if v.Retention <= 0 {
+			continue
+		}
+
+		expirationTime := v.CreatedAt.Add(time.Duration(v.Retention) * time.Second)
+
+		if expirationTime.Before(now) {
+			cm.deleteVersionUnsafe(v.FileName, v.Id)
+		}
+	}
+}
+
+func (cm *chunkmesh) pruneEmptyDirectoriesUnsafe() {
+	chunksBaseDir := filepath.Join(cm.Path, "chunks")
+
+	level1Dirs, err := os.ReadDir(chunksBaseDir)
+	if err != nil {
+		return
+	}
+
+	for _, l1 := range level1Dirs {
+		if !l1.IsDir() {
+			continue
+		}
+		l1Path := filepath.Join(chunksBaseDir, l1.Name())
+
+		level2Dirs, err := os.ReadDir(l1Path)
+		if err == nil {
+			for _, l2 := range level2Dirs {
+				if !l2.IsDir() {
+					continue
+				}
+				l2Path := filepath.Join(l1Path, l2.Name())
+				os.Remove(l2Path)
+			}
+		}
+		os.Remove(l1Path)
+	}
+}
+
+func (cm *chunkmesh) deleteVersionUnsafe(name string, versionId string) error {
 	fileData, err := database.GetData(cm.BoltDB, BucketFiles, name)
 	if err != nil {
 		return fmt.Errorf("file '%s' not found", name)
@@ -326,58 +453,6 @@ func DeleteVersion(cm *chunkmesh, name string, versionId string) error {
 	database.DeleteKey(cm.BoltDB, BucketVersions, idVersion)
 
 	return nil
-}
-
-func (cm *chunkmesh) CleanOrphanChunks() {
-	physicalFiles := utils.ListFiles(filepath.Join(cm.Path, "chunks"))
-
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
-
-	var filesToDelete []string
-
-	for _, fPath := range physicalFiles {
-		fileNameWithExt := filepath.Base(fPath)
-		parts := strings.Split(fileNameWithExt, ".")
-		if len(parts) != 2 {
-			filesToDelete = append(filesToDelete, fPath)
-			continue
-		}
-		chunkID := parts[0]
-
-		exists, _ := database.ExistsKey(cm.BoltDB, BucketChunks, chunkID)
-		if !exists {
-			filesToDelete = append(filesToDelete, fPath)
-		} else {
-			cData, _ := database.GetData(cm.BoltDB, BucketChunks, chunkID)
-			var c models.Chunk
-			json.Unmarshal(cData, &c)
-			if c.RefCount <= 0 {
-				filesToDelete = append(filesToDelete, fPath)
-				database.DeleteKey(cm.BoltDB, BucketChunks, chunkID)
-			}
-		}
-	}
-
-	if len(filesToDelete) == 0 {
-		return
-	}
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, runtime.NumCPU())
-
-	for _, f := range filesToDelete {
-		wg.Add(1)
-		go func(filePath string) {
-			sem <- struct{}{}
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-			os.Remove(filePath)
-		}(f)
-	}
-	wg.Wait()
 }
 
 func (chunkmesh *chunkmesh) GetLatestVersion(name string) (string, error) {
