@@ -1,9 +1,6 @@
 # chunkmesh
 `chunkmesh` is a lightweight, local file storage system designed to offer efficient, resilient and versioned archiving through chunk-level data deduplication. This project optimizes storage space by eliminating data redundancy and providing granular control over file modifications over time.
 
-> [!WARNING]
-> This project is currently a Proof of Concept (POC) and is not suitable for a production environment. It is intended for developer use only.
-
 ---
 
 ## Table of Contents
@@ -56,8 +53,8 @@ import "github.com/FraMan97/chunkmesh/src/core"
 const MB = 1024 * 1024
 
 storage, err := core.NewChunkMeshStorage(
-    "/data/my_storage", // Path to local folder
-    4 * MB,             // Chunk size
+             "/data/my_storage", // Path to local folder
+             4 * MB,             // Chunk size
 )
 if err != nil { /* handle error */ }
 ```
@@ -67,20 +64,20 @@ if err != nil { /* handle error */ }
 ```go
 
 // Add file (version) by local path
-err := storage.AddByPath(
-    "file.txt", // File name. Include the extension for logical grouping
-    "path/to/file.txt", // Full local path to the file.
-    true, // Enable default compression with gzip
-    3600, // Retention Policy in seconds. '0' means no future deletion
+versionId, err := storage.AddByPath(
+               "file.txt", // File name. Include the extension for logical grouping
+               "path/to/file.txt", // Full local path to the file.
+               true, // Enable default compression with gzip
+               3600, // Retention Policy in seconds. '0' means no future deletion
 )
 if err != nil { /* handle error */ }
 
 // Add file (version) by []byte content
-err = storage.AddByInfo(
-    "file.txt", // File name. Include the extension for logical grouping
-    content, // File content in []byte
-    true, // Enable default compression with gzip
-    3600, // Retention Policy in seconds. '0' means no future deletion
+versionId, err = storage.AddByInfo(
+               "file.txt", // File name. Include the extension for logical grouping
+               content, // File content in []byte
+               true, // Enable default compression with gzip
+               3600, // Retention Policy in seconds. '0' means no future deletion
 )
 if err != nil { /* handle error */ }
 
@@ -98,8 +95,8 @@ if err != nil { /* handle error */ }
 
 // Get file (version)
 content, err := storage.Get(
-    "file.txt", //File name. Include the extension for logical grouping
-    "anshd...", //Version id to get or use "latest" for the most recent version
+             "file.txt", //File name. Include the extension for logical grouping
+             "anshd...", //Version id to get or use "latest" for the most recent version
 )
 if err != nil { /* handle error */ }
 ```
@@ -116,8 +113,8 @@ storage.CleanUp()
 
 ```go
 
-latest, err := storage.GetLatestVersion(
-    "file.txt", //File name. Include the extension for logical grouping
+latestVersionId, err := storage.GetLatestVersion(
+                     "file.txt", //File name. Include the extension for logical grouping
 )
 if err != nil { /* handle error */ }
 ```
