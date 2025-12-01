@@ -1,4 +1,4 @@
-package core
+package chunkmesh
 
 import (
 	"bytes"
@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/FraMan97/chunkmesh/src/database"
-	"github.com/FraMan97/chunkmesh/src/models"
-	"github.com/FraMan97/chunkmesh/src/utils"
+	"github.com/FraMan97/chunkmesh/internal/database"
+	"github.com/FraMan97/chunkmesh/internal/models"
+	"github.com/FraMan97/chunkmesh/internal/utils"
 	"github.com/boltdb/bolt"
 	"github.com/google/uuid"
 )
@@ -26,13 +26,13 @@ const (
 )
 
 type chunkmesh struct {
-	Path      string
-	BoltDB    *bolt.DB
-	Lock      *sync.RWMutex
-	ChunkSize int
+	Path             string
+	boltdb           *bolt.DB
+	lock             *sync.RWMutex
+	AverageChunkSize int
 }
 
-func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
+func NewChunkMeshStorage(path string, avgChunkSize int) (*chunkmesh, error) {
 	os.MkdirAll(path, 0755)
 	os.MkdirAll(filepath.Join(path, "chunks"), 0755)
 
@@ -42,15 +42,15 @@ func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
 	}
 
 	cm := chunkmesh{
-		Path:      path,
-		BoltDB:    db,
-		Lock:      &sync.RWMutex{},
-		ChunkSize: chunkSize,
+		Path:             path,
+		boltdb:           db,
+		lock:             &sync.RWMutex{},
+		AverageChunkSize: avgChunkSize,
 	}
 
 	buckets := []string{BucketFiles, BucketVersions, BucketChunks}
 	for _, bucket := range buckets {
-		err = database.EnsureBucket(cm.BoltDB, bucket)
+		err = database.EnsureBucket(cm.boltdb, bucket)
 		if err != nil {
 			return nil, err
 		}
@@ -59,9 +59,9 @@ func NewChunkMeshStorage(path string, chunkSize int) (*chunkmesh, error) {
 	return &cm, nil
 }
 
-func (cm *chunkmesh) AddByPath(name string, path string, compress bool, retention int) (string, error) {
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
+func (cm *chunkmesh) AddByPath(name string, path string, compress bool, retention int, passphrase string) (string, error) {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -69,20 +69,20 @@ func (cm *chunkmesh) AddByPath(name string, path string, compress bool, retentio
 	}
 	defer f.Close()
 
-	return add(cm, name, compress, retention, f)
+	return add(cm, name, compress, retention, passphrase, f)
 }
 
-func (cm *chunkmesh) AddByInfo(name string, data []byte, compress bool, retention int) (string, error) {
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
+func (cm *chunkmesh) AddByInfo(name string, data []byte, compress bool, retention int, passphrase string) (string, error) {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 
 	r := bytes.NewReader(data)
-	return add(cm, name, compress, retention, r)
+	return add(cm, name, compress, retention, passphrase, r)
 }
 
-func add(cm *chunkmesh, name string, compression bool, retention int, reader io.Reader) (string, error) {
+func add(cm *chunkmesh, name string, compression bool, retention int, passphrase string, reader io.Reader) (string, error) {
 	var currentFile models.File
-	fileData, err := database.GetData(cm.BoltDB, BucketFiles, name)
+	fileData, err := database.GetData(cm.boltdb, BucketFiles, name)
 
 	versionId := uuid.New().String()
 
@@ -117,14 +117,24 @@ func add(cm *chunkmesh, name string, compression bool, retention int, reader io.
 	tempChunks := make(map[int]string)
 	var mu sync.Mutex
 
-	totalRead, err := utils.ProcessChunks(reader, cm.ChunkSize, compression, runtime.NumCPU(), func(index int, c []byte) error {
-		chunkId := utils.GenerateHash(c)
-
+	totalRead, err := utils.ProcessChunks(reader, cm.AverageChunkSize, compression, runtime.NumCPU(), func(index int, c []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 
+		var processedData []byte
+		if passphrase != "" {
+			aesKey := utils.DeriveKey(passphrase)
+			processedData, err = utils.Encrypt(c, aesKey)
+			if err != nil {
+				return err
+			}
+		} else {
+			processedData = c
+		}
+		chunkId := utils.GenerateHash(processedData)
+
 		var currentChunk models.Chunk
-		chunkData, err := database.GetData(cm.BoltDB, BucketChunks, chunkId)
+		chunkData, err := database.GetData(cm.boltdb, BucketChunks, chunkId)
 		exists := (err == nil && chunkData != nil)
 
 		if !exists {
@@ -132,7 +142,7 @@ func add(cm *chunkmesh, name string, compression bool, retention int, reader io.
 			os.MkdirAll(dirPath, 0755)
 			chunkFilePath := filepath.Join(dirPath, chunkId+".chunk")
 
-			if err := os.WriteFile(chunkFilePath, c, 0644); err != nil {
+			if err := os.WriteFile(chunkFilePath, processedData, 0644); err != nil {
 				return err
 			}
 
@@ -152,7 +162,7 @@ func add(cm *chunkmesh, name string, compression bool, retention int, reader io.
 		if err != nil {
 			return err
 		}
-		if err := database.PutData(cm.BoltDB, BucketChunks, chunkId, chunkBytes); err != nil {
+		if err := database.PutData(cm.boltdb, BucketChunks, chunkId, chunkBytes); err != nil {
 			return err
 		}
 
@@ -179,7 +189,7 @@ func add(cm *chunkmesh, name string, compression bool, retention int, reader io.
 	if err != nil {
 		return "", err
 	}
-	if err := database.PutData(cm.BoltDB, BucketVersions, versionId, versionBytes); err != nil {
+	if err := database.PutData(cm.boltdb, BucketVersions, versionId, versionBytes); err != nil {
 		return "", err
 	}
 
@@ -187,24 +197,24 @@ func add(cm *chunkmesh, name string, compression bool, retention int, reader io.
 	if err != nil {
 		return "", err
 	}
-	if err := database.PutData(cm.BoltDB, BucketFiles, name, fileMetaBytes); err != nil {
+	if err := database.PutData(cm.boltdb, BucketFiles, name, fileMetaBytes); err != nil {
 		return "", err
 	}
 
 	return versionId, nil
 }
 
-func (cm *chunkmesh) Get(name string, versionIdRequested string) ([]byte, error) {
-	cm.Lock.RLock()
-	defer cm.Lock.RUnlock()
+func (cm *chunkmesh) Get(name string, versionIdRequested string, key string, dst io.Writer) error {
+	cm.lock.RLock()
+	defer cm.lock.RUnlock()
 
-	fileData, err := database.GetData(cm.BoltDB, BucketFiles, name)
+	fileData, err := database.GetData(cm.boltdb, BucketFiles, name)
 	if err != nil || fileData == nil {
-		return nil, fmt.Errorf("file '%s' not found", name)
+		return fmt.Errorf("file '%s' not found", name)
 	}
 	var targetFile models.File
 	if err := json.Unmarshal(fileData, &targetFile); err != nil {
-		return nil, err
+		return err
 	}
 
 	var finalVersionID string
@@ -214,52 +224,61 @@ func (cm *chunkmesh) Get(name string, versionIdRequested string) ([]byte, error)
 		finalVersionID = versionIdRequested
 	}
 
-	versionData, err := database.GetData(cm.BoltDB, BucketVersions, finalVersionID)
+	versionData, err := database.GetData(cm.boltdb, BucketVersions, finalVersionID)
 	if err != nil || versionData == nil {
-		return nil, fmt.Errorf("version '%s' not found", finalVersionID)
+		return fmt.Errorf("version '%s' not found", finalVersionID)
 	}
 	var targetVersion models.Version
 	if err := json.Unmarshal(versionData, &targetVersion); err != nil {
-		return nil, err
+		return err
 	}
 
 	resultedFile := make([]byte, 0, targetVersion.Size)
 
 	for _, chunkID := range targetVersion.Chunks {
-		chunkMetaBytes, err := database.GetData(cm.BoltDB, BucketChunks, chunkID)
+		chunkMetaBytes, err := database.GetData(cm.boltdb, BucketChunks, chunkID)
 		if err != nil || chunkMetaBytes == nil {
-			return nil, fmt.Errorf("chunk '%s' not found in DB", chunkID)
+			return fmt.Errorf("chunk '%s' not found in DB", chunkID)
 		}
 		var chunkMeta models.Chunk
 		if err := json.Unmarshal(chunkMetaBytes, &chunkMeta); err != nil {
-			return nil, err
+			return err
 		}
 
 		chunkPath := filepath.Join(cm.Path, "chunks", chunkID[:2], chunkID[2:4], chunkID+".chunk")
 		chunkBytes, err := os.ReadFile(chunkPath)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if chunkID != utils.GenerateHash(chunkBytes) {
-			return nil, fmt.Errorf("integrity check failed for chunk '%s'", chunkID)
+			return fmt.Errorf("integrity check failed for chunk '%s'", chunkID)
+		}
+
+		if key != "" {
+			aesKey := utils.DeriveKey(key)
+			chunkBytes, err = utils.Decrypt(chunkBytes, aesKey)
+			if err != nil {
+				return fmt.Errorf("decryption failed for chunk '%s': %v", chunkID, err)
+			}
 		}
 
 		if chunkMeta.Compression {
 			chunkBytes, err = utils.Decompress(chunkBytes)
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		resultedFile = append(resultedFile, chunkBytes...)
 	}
 
-	return resultedFile, nil
+	dst.Write(resultedFile)
+	return nil
 }
 
 func (cm *chunkmesh) CleanUp() {
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 
 	cm.cleanOrphanChunksUnsafe()
 	cm.cleanCorruptedVersionsUnsafe()
@@ -268,8 +287,8 @@ func (cm *chunkmesh) CleanUp() {
 }
 
 func (cm *chunkmesh) Delete(name string, versionId string) error {
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 	return cm.deleteVersionUnsafe(name, versionId)
 }
 
@@ -285,23 +304,23 @@ func (cm *chunkmesh) cleanOrphanChunksUnsafe() {
 		}
 		chunkID := parts[0]
 
-		exists, _ := database.ExistsKey(cm.BoltDB, BucketChunks, chunkID)
+		exists, _ := database.ExistsKey(cm.boltdb, BucketChunks, chunkID)
 		if !exists {
 			os.Remove(fPath)
 		} else {
-			cData, _ := database.GetData(cm.BoltDB, BucketChunks, chunkID)
+			cData, _ := database.GetData(cm.boltdb, BucketChunks, chunkID)
 			var c models.Chunk
 			json.Unmarshal(cData, &c)
 			if c.RefCount <= 0 {
 				os.Remove(fPath)
-				database.DeleteKey(cm.BoltDB, BucketChunks, chunkID)
+				database.DeleteKey(cm.boltdb, BucketChunks, chunkID)
 			}
 		}
 	}
 }
 
 func (cm *chunkmesh) cleanCorruptedVersionsUnsafe() {
-	vData, err := database.GetAllData(cm.BoltDB, BucketVersions)
+	vData, err := database.GetAllData(cm.boltdb, BucketVersions)
 	if err != nil {
 		return
 	}
@@ -334,7 +353,7 @@ func (cm *chunkmesh) cleanCorruptedVersionsUnsafe() {
 }
 
 func (cm *chunkmesh) cleanExpiredVersionsUnsafe() {
-	vData, err := database.GetAllData(cm.BoltDB, BucketVersions)
+	vData, err := database.GetAllData(cm.boltdb, BucketVersions)
 	if err != nil {
 		return
 	}
@@ -388,7 +407,7 @@ func (cm *chunkmesh) pruneEmptyDirectoriesUnsafe() {
 }
 
 func (cm *chunkmesh) deleteVersionUnsafe(name string, versionId string) error {
-	fileData, err := database.GetData(cm.BoltDB, BucketFiles, name)
+	fileData, err := database.GetData(cm.boltdb, BucketFiles, name)
 	if err != nil {
 		return fmt.Errorf("file '%s' not found", name)
 	}
@@ -400,7 +419,7 @@ func (cm *chunkmesh) deleteVersionUnsafe(name string, versionId string) error {
 		idVersion = targetFile.LastVersion
 	}
 
-	vData, err := database.GetData(cm.BoltDB, BucketVersions, idVersion)
+	vData, err := database.GetData(cm.boltdb, BucketVersions, idVersion)
 	if err != nil {
 		return fmt.Errorf("version '%s' not found", idVersion)
 	}
@@ -408,7 +427,7 @@ func (cm *chunkmesh) deleteVersionUnsafe(name string, versionId string) error {
 	json.Unmarshal(vData, &targetVersion)
 
 	for _, chunkID := range targetVersion.Chunks {
-		cData, err := database.GetData(cm.BoltDB, BucketChunks, chunkID)
+		cData, err := database.GetData(cm.boltdb, BucketChunks, chunkID)
 		if err != nil {
 			continue
 		}
@@ -420,10 +439,10 @@ func (cm *chunkmesh) deleteVersionUnsafe(name string, versionId string) error {
 		if chunkMeta.RefCount <= 0 {
 			chunkFilePath := filepath.Join(cm.Path, "chunks", chunkMeta.Id[:2], chunkMeta.Id[2:4], chunkMeta.Id+".chunk")
 			os.Remove(chunkFilePath)
-			database.DeleteKey(cm.BoltDB, BucketChunks, chunkID)
+			database.DeleteKey(cm.boltdb, BucketChunks, chunkID)
 		} else {
 			updatedCData, _ := json.Marshal(chunkMeta)
-			database.PutData(cm.BoltDB, BucketChunks, chunkID, updatedCData)
+			database.PutData(cm.boltdb, BucketChunks, chunkID, updatedCData)
 		}
 	}
 
@@ -444,21 +463,21 @@ func (cm *chunkmesh) deleteVersionUnsafe(name string, versionId string) error {
 	}
 
 	if len(targetFile.Versions) == 0 {
-		database.DeleteKey(cm.BoltDB, BucketFiles, name)
+		database.DeleteKey(cm.boltdb, BucketFiles, name)
 	} else {
 		updatedFData, _ := json.Marshal(targetFile)
-		database.PutData(cm.BoltDB, BucketFiles, name, updatedFData)
+		database.PutData(cm.boltdb, BucketFiles, name, updatedFData)
 	}
 
-	database.DeleteKey(cm.BoltDB, BucketVersions, idVersion)
+	database.DeleteKey(cm.boltdb, BucketVersions, idVersion)
 
 	return nil
 }
 
 func (chunkmesh *chunkmesh) GetLatestVersion(name string) (string, error) {
-	chunkmesh.Lock.RLock()
-	defer chunkmesh.Lock.RUnlock()
-	fileData, err := database.GetData(chunkmesh.BoltDB, BucketFiles, name)
+	chunkmesh.lock.RLock()
+	defer chunkmesh.lock.RUnlock()
+	fileData, err := database.GetData(chunkmesh.boltdb, BucketFiles, name)
 	if err != nil {
 		return "", err
 	}
