@@ -21,7 +21,7 @@
 
 ## Key Features
 
-* **Chunk-Level Deduplication**: Files are split into fixed-size blocks (chunks). Only unique chunks are physically stored, while duplicate files or versions referencing existing chunks simply point to the stored data.
+* **Content-Defined Deduplication**: Instead of traditional fixed-size splitting, files are divided into variable-size chunks using the **FastCDC** algorithm. This ensures that minor insertions or deletions only affect local chunks rather than shifting the entire file structure, significantly improving deduplication efficiency.
 * **Efficient Compression**: Uses standard GZIP compression (`gzip.DefaultCompression`) to balance speed and storage efficiency.
 * **Data Integrity Assurance**: Automatically performs SHA-256 integrity checks during file retrieval (`Get`) to detect and prevent silent data corruption immediately upon access.
 * **AES Encryption**: Supports optional AES-256 (GCM) encryption for data security. Chunks are encrypted using keys derived from a user-provided passphrase, ensuring content confidentiality before it is written to disk.
@@ -55,12 +55,13 @@
 ```go
 import "github.com/FraMan97/chunkmesh/src/core"
 
-// Use a larger chunk size (e.g., 4MB) for better performance on large files
+// Set the target AVERAGE chunk size (e.g., 4MB).
+// FastCDC will adjust actual chunk sizes dynamically based on content.
 const MB = 1024 * 1024
 
 storage, err := core.NewChunkMeshStorage(
              "/data/my_storage", // Path to local folder
-             4 * MB,             // Chunk size
+             4 * MB,             // Average chunk size
 )
 if err != nil { /* handle error */ }
 ```
