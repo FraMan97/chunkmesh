@@ -3,7 +3,7 @@
 ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 ![BoltDB](https://img.shields.io/badge/BoltDB-BB3333?style=for-the-badge&logo=google-cloud&logoColor=white)
-![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=for-the-badge&logo=apache&logoColor=white)
+![License](https://img.shields.io/badge/License-GNU_AGPL_v3-blue?style=for-the-badge&logo=gnu&logoColor=white)
 
 `chunkmesh` is a lightweight, local file storage system designed to offer efficient, resilient and versioned archiving through chunk-level data deduplication. This project optimizes storage space by eliminating data redundancy and providing granular control over file modifications over time.
 
