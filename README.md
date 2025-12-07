@@ -3,9 +3,12 @@
 ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 ![BoltDB](https://img.shields.io/badge/BoltDB-BB3333?style=for-the-badge&logo=google-cloud&logoColor=white)
+![AWS S3](https://img.shields.io/badge/AWS%20S3-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)
+![Google Cloud](https://img.shields.io/badge/Google%20Cloud-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)
 ![License](https://img.shields.io/badge/License-GNU_AGPL_v3-blue?style=for-the-badge&logo=gnu&logoColor=white)
 
-`chunkmesh` is a lightweight, local file storage system designed to offer efficient, resilient and versioned archiving through chunk-level data deduplication. This project optimizes storage space by eliminating data redundancy and providing granular control over file modifications over time.
+`chunkmesh` is a hybrid Content-Addressable Storage (CAS) system designed to offer efficient, resilient, and versioned archiving through chunk-level data deduplication. 
+Built to support **Local Filesystem**, **AWS S3**, and **Google Cloud Storage (GCS)**, this project optimizes storage space and network bandwidth by eliminating data redundancy and providing granular control over file lifecycle.
 
 ---
 
@@ -16,29 +19,30 @@
 * [Installation and Setup](#installation-and-setup)
     * [Prerequisites](#prerequisites)
     * [How to Use](#1-how-to-use)
+* [Road Map](#road-map)
+
 
 ---
 
 ## Key Features
 
-* **Content-Defined Deduplication**: Instead of traditional fixed-size splitting, files are divided into variable-size chunks using the **FastCDC** algorithm. This ensures that minor insertions or deletions only affect local chunks rather than shifting the entire file structure, significantly improving deduplication efficiency.
-* **Efficient Compression**: Uses standard GZIP compression (`gzip.DefaultCompression`) to balance speed and storage efficiency.
-* **Data Integrity Assurance**: Automatically performs SHA-256 integrity checks during file retrieval (`Get`) to detect and prevent silent data corruption immediately upon access.
-* **AES Encryption**: Supports optional AES-256 (GCM) encryption for data security. Chunks are encrypted using keys derived from a user-provided passphrase, ensuring content confidentiality before it is written to disk.
-* **Retention Policy**: Supports optional Time-to-Live (TTL) for files. Versions older than the specified retention period are automatically purged during cleanup.
-* **Stream-Based Processing**: Built on Go's `io.Reader` interfaces, `chunkmesh` processes files of any size (GBs or TBs) using a constant, minimal amount of RAM.
-* **Optimized File Layout (Sharding)**: Chunks are stored using a directory sharding strategy (e.g., `chunks/ab/cd/...`) to prevent filesystem performance degradation.
-* **Atomic-like State Management**: Operations are protected by locking mechanisms and transactional metadata updates.
-* **Intelligent Garbage Collection**: A comprehensive clean-up mechanism removes orphan chunks, expired versions, corrupted versions (through SHA-256 integrity checks of version chunks) and empty directories.
+* **Hybrid Backend Support**: Seamlessly store data across Local Filesystems, AWS S3, and Google Cloud Storage while keeping metadata fast and local.
+* **Content-Defined Deduplication**: Uses the **FastCDC** algorithm to split files into variable-size chunks. This ensures that minor insertions or shifts only affect local chunks, maximizing deduplication efficiency and minimizing cloud egress/ingress.
+* **Data Integrity Assurance**: Automatically performs SHA-256 integrity checks during retrieval to detect silent data corruption.
+* **AES Encryption**: Supports optional AES-256 (GCM) client-side encryption. Chunks are encrypted before being written to disk or uploaded to the cloud.
+* **Retention Policy**: Supports optional Time-to-Live (TTL). Expired versions are automatically purged during cleanup.
+* **Stream-Based Processing**: Built around `io.Reader`, enabling processing of large files with constant, minimal RAM usage.
+* **Atomic State Management**: Metadata is managed via a transactional local Key/Value store (BoltDB).
 
 ---
 
 ## Technology Stack
 
-* **Core Language**: Go (Golang)
-* **Database**: Embedded Key/Value store (BoltDB):
-    * `boltdb.db`: Stores metadata, file registry, chunk references and version history using efficient, transactional B+ trees.
-    * `chunks/`: Stores the deduplicated (and optionally compressed) binary content on the filesystem.
+* **Core Language**: Go (Golang) v1.24+
+* **Metadata Store**: Embedded Key/Value store (BoltDB) for file registry, version trees, and chunk reference counting.
+* **Blob Storage**:
+    * **Local**: Sharded directory structure for efficient file organization (e.g., `chunks/ab/cd/...`).
+    * **S3/GCS**: Object storage buckets with content-addressable keys.
 
 ---
 
@@ -46,89 +50,132 @@
 
 > [!NOTE]
 > ### Prerequisites
-> * Go (v 1.24 or later)
+> * Go (v 1.24 or later).
 
 ### 1. How to Use
 
-**Initialization**
+**Initialization (Select a Provider)**
+
+You can initialize the storage using one of the available providers (`local`, `s3`, `gcs`).
 
 ```go
-import "github.com/FraMan97/chunkmesh/src/core"
-
-// Set the target AVERAGE chunk size (e.g., 4MB).
-// FastCDC will adjust actual chunk sizes dynamically based on content.
-const MB = 1024 * 1024
-
-storage, err := core.NewChunkMeshStorage(
-             "/data/my_storage", // Path to local folder
-             4 * MB,             // Average chunk size
+import (
+    "context"
+    "github.com/FraMan97/chunkmesh/local"
+    "github.com/FraMan97/chunkmesh/s3"
+    "github.com/FraMan97/chunkmesh/gcs"
+    "github.com/FraMan97/chunkmesh/pkg"
 )
-if err != nil { /* handle error */ }
+
+func main() {
+    ctx := context.Background()
+    avgChunkSize := 5000 // Target average chunk size in bytes
+
+    // Option A: Local Storage
+    store, _ := local.NewLocalStorage(ctx, &local.LocalStorageOptions{
+        MetadataDirectoryPath: "/path/to/local",
+        BucketChunksPath: "/database/chunks",
+        AvgChunkSize:          avgChunkSize,
+    })
+
+    // Option B: AWS S3
+    store, _ := s3store.NewS3Storage(ctx, &s3store.S3StorageOptions{
+        Bucket:           "my-bucket",
+        Region:           "us-east-1",
+        MetadataDirectoryPath: "/path/to/local",
+        BucketChunksPath: "/database/chunks",
+        AvgChunkSize:     avgChunkSize,
+     })
+    
+    // Option C: Google Cloud Storage
+    store, _ := gcs.NewGCSStorage(ctx, &gcs.GCSStorageOptions{
+        Bucket:           "my-gcs-bucket",
+        ProjectId:        "my-project-id",
+        MetadataDirectoryPath: "/path/to/local",
+        BucketChunksPath: "/database/chunks",
+        AvgChunkSize:     avgChunkSize,
+     })
+}
 ```
 
-**Add file and Delete file**
+**Add File**
+
 
 ```go
+// Configure upload options
+opts := &pkg.StoreObjectOptions{
+    Compress:   true,           // Enable GZIP compression
+    Retention:  3600,           // TTL in seconds (0 = forever)
+    Passphrase: "secret-key",   // Encryption passphrase ("" = no encryption)
+}
 
-// Add file (version) by local path
-versionId, err := storage.AddByPath(
-               "file.txt", // File name. Include the extension for logical grouping
-               "path/to/file.txt", // Full local path to the file.
-               true, // Enable default compression with gzip
-               3600, // Retention Policy in seconds. '0' means no future deletion
-               "passphrase", // Passphrase used to generate an AES encryption key. "" means no encryption
-)
-if err != nil { /* handle error */ }
+// Add by Path: (Context, File Name, Local File Path, Options)
+versionID, err := store.AddByPath(ctx, "report.pdf", "/local/path/to/report.pdf", opts)
+if err != nil {
+    log.Fatal(err)
+}
 
-// Add file (version) by []byte content
-versionId, err = storage.AddByInfo(
-               "file.txt", // File name. Include the extension for logical grouping
-               content, // File content in []byte
-               true, // Enable default compression with gzip
-               3600, // Retention Policy in seconds. '0' means no future deletion
-               "passphrase", // Passphrase used to generate an AES encryption key. "" means no encryption
+fmt.Printf("File uploaded successfully. Version ID: %s\n", versionID)
 
-)
-if err != nil { /* handle error */ }
-
-// Delete file (version)
-err = storage.Delete(
-    "file.txt", // File name. Include the extension for logical grouping
-    "anshd...", // Version id to delete or use "latest" for the most recent version
-)
-if err != nil { /* handle error */ }
 ```
 
-**Get file**
+**Get File**
+
 
 ```go
+// Download File: (File Name)
+outputFile, err := os.Create("downloaded_report.pdf")
+if err != nil {
+    log.Fatal(err)
+}
+defer outputFile.Close()
 
-// Get file (version)
-file, err := os.Open("filex.txt")
-content, err := storage.Get(
-             "file.txt", // File name. Include the extension for logical grouping
-             "anshd...", // Version id to get or use "latest" for the most recent version
-             "passphrase", // Passphrase used to generate an AED decryption key. "" means no decryption
-             file, // Writer associated to the destination file
+// Get File: (Context, File Name, Version ID or "latest", Passphrase or "", Destination)
+err = store.Get(
+    ctx, 
+    "report.pdf", 
+    "latest",          
+    "secret-key",      
+    outputFile,        
 )
-if err != nil { /* handle error */ }
-```
+if err != nil {
+    log.Fatal(err)
+}
 
-**Clean database**
+```
+**Delete File**
+
 
 ```go
+// Delete File Version: (File Name, VersionId or "latest")
+err := store.Delete(ctx, "report.pdf", "latest")
+if err != nil {
+    log.Fatal(err)
+}
 
-// Clean orphan chunks, corrupted versions, expired versions and empty directories
-storage.CleanUp()
 ```
+**Maintenance**
 
-**Get latest file version**
 
 ```go
+// Clean Database: (Context)
+store.CleanUp(ctx)
 
-latestVersionId, err := storage.GetLatestVersion(
-                     "file.txt", // File name. Include the extension for logical grouping
-)
-if err != nil { /* handle error */ }
 ```
----
+**Backup (Cloud only)**
+
+
+```go
+// Backup Metadata File (Context, Backup Bucket, Bucket Path)
+err := store.BackupMetadata(ctx, "my-backup-bucket", "backups/metadata.db")
+if err != nil {
+    log.Printf("Backup failed: %v", err)
+}
+```
+
+
+## Road Map
+
+* [] Add MongoDB as metadata database support
+* [] Add Postgresql as metadata database support
+* [] Add Azure as cloud storage support
