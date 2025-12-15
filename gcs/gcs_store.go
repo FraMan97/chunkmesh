@@ -12,47 +12,64 @@ import (
 	"sync"
 
 	"cloud.google.com/go/storage"
-	"github.com/FraMan97/chunkmesh/internal/database"
+	boltdb_manager "github.com/FraMan97/chunkmesh/internal/database/boltdb"
+	mongodb_manager "github.com/FraMan97/chunkmesh/internal/database/mongodb"
 	"github.com/FraMan97/chunkmesh/internal/models"
 	"github.com/FraMan97/chunkmesh/internal/utils"
 	"github.com/FraMan97/chunkmesh/pkg"
-	"github.com/boltdb/bolt"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
 type GCSStorageOptions struct {
-	BucketChunksPath      string
-	MetadataDirectoryPath string
-	Bucket                string
-	Region                string
-	AvgChunkSize          int
-	ProjectId             string
-	Endpoint              string
+	BucketChunksPath string
+	MetadataURI      string
+	MetadataType     string
+	Bucket           string
+	Region           string
+	AvgChunkSize     int
+	ProjectId        string
+	Endpoint         string
 }
 
 type GCSStorage struct {
-	BucketChunksPath      string
-	MetadataDirectoryPath string
-	Bucket                string
-	Client                *storage.Client
-	Region                string
-	ProjectId             string
-	lock                  *sync.RWMutex
-	boltdb                *bolt.DB
-	AverageChunkSize      int
+	BucketChunksPath string
+	MetadataURI      string
+	MetadataType     string
+	Bucket           string
+	Client           *storage.Client
+	Region           string
+	ProjectId        string
+	lock             *sync.RWMutex
+	metadataStorage  models.MetadataStore
+	AverageChunkSize int
 }
 
 const (
-	BucketFiles    = "files"
-	BucketVersions = "versions"
-	BucketChunks   = "chunks"
+	CollectionFiles    = "files"
+	CollectionVersions = "versions"
+	CollectionChunks   = "chunks"
 )
 
+var MetadataTypes = []string{"boltdb", "mongodb"}
+
 func NewGCSStorage(context context.Context, options *GCSStorageOptions) (*GCSStorage, error) {
-	db, err := database.OpenDatabase(options.MetadataDirectoryPath)
-	if err != nil {
-		return nil, err
+
+	var db models.MetadataStore
+	var err error
+	switch options.MetadataType {
+	case "boltdb":
+		db, err = boltdb_manager.OpenDatabase(options.MetadataURI)
+		if err != nil {
+			return nil, err
+		}
+	case "mongodb":
+		db, err = mongodb_manager.OpenDatabase(options.MetadataURI)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("metadata type %s not supported. Supported only '%v'", options.MetadataType, MetadataTypes)
 	}
 
 	var clientOpts []option.ClientOption
@@ -67,25 +84,30 @@ func NewGCSStorage(context context.Context, options *GCSStorageOptions) (*GCSSto
 		return nil, err
 	}
 
-	store := GCSStorage{
-		BucketChunksPath:      options.BucketChunksPath,
-		MetadataDirectoryPath: options.MetadataDirectoryPath,
-		Bucket:                options.Bucket,
-		Client:                client,
-		boltdb:                db,
-		lock:                  &sync.RWMutex{},
-		AverageChunkSize:      options.AvgChunkSize,
+	storage := GCSStorage{
+		BucketChunksPath: options.BucketChunksPath,
+		MetadataURI:      options.MetadataURI,
+		MetadataType:     options.MetadataType,
+		Bucket:           options.Bucket,
+		Client:           client,
+		metadataStorage:  db,
+		lock:             &sync.RWMutex{},
+		AverageChunkSize: options.AvgChunkSize,
+		Region:           options.Region,
+		ProjectId:        options.ProjectId,
 	}
 
-	buckets := []string{BucketFiles, BucketVersions, BucketChunks}
-	for _, bucket := range buckets {
-		err = database.EnsureBucket(store.boltdb, bucket)
+	collections := []string{CollectionFiles, CollectionVersions, CollectionChunks}
+	for _, collection := range collections {
+		err := storage.metadataStorage.EnsureCollection(context, collection)
 		if err != nil {
 			return nil, err
 		}
 	}
-	client.Bucket(options.Bucket).Create(context, options.ProjectId, nil)
-	return &store, nil
+	if options.ProjectId != "" {
+		client.Bucket(options.Bucket).Create(context, options.ProjectId, nil)
+	}
+	return &storage, nil
 }
 
 func (s *GCSStorage) AddByPath(context context.Context, fileName string, filePath string, options *pkg.StoreObjectOptions) (string, error) {
@@ -109,7 +131,7 @@ func (s *GCSStorage) AddByPath(context context.Context, fileName string, filePat
 		return wc.Close()
 	}
 
-	return utils.CoreAdd(s.boltdb, fileName, s.AverageChunkSize, options, f, saveToBucket)
+	return utils.CoreAdd(context, s.metadataStorage, fileName, s.AverageChunkSize, options, f, saveToBucket)
 }
 
 func (s *GCSStorage) AddByInfo(context context.Context, fileName string, data []byte, options *pkg.StoreObjectOptions) (string, error) {
@@ -129,7 +151,7 @@ func (s *GCSStorage) AddByInfo(context context.Context, fileName string, data []
 		return wc.Close()
 	}
 
-	return utils.CoreAdd(s.boltdb, fileName, s.AverageChunkSize, options, r, saveToBucket)
+	return utils.CoreAdd(context, s.metadataStorage, fileName, s.AverageChunkSize, options, r, saveToBucket)
 }
 
 func (s *GCSStorage) Get(context context.Context, fileName string, versionIdRequested string, passphrase string, dst io.Writer) error {
@@ -144,7 +166,7 @@ func (s *GCSStorage) Get(context context.Context, fileName string, versionIdRequ
 
 		return io.ReadAll(rc)
 	}
-	return utils.CoreGet(s.boltdb, s.lock, fileName, versionIdRequested, passphrase, getFromBucket, dst)
+	return utils.CoreGet(context, s.metadataStorage, s.lock, fileName, versionIdRequested, passphrase, getFromBucket, dst)
 }
 
 func (s *GCSStorage) Delete(context context.Context, fileName string, versionId string) error {
@@ -160,13 +182,13 @@ func (s *GCSStorage) Delete(context context.Context, fileName string, versionId 
 		}
 		return nil
 	}
-	return utils.CoreDelete(s.boltdb, fileName, versionId, deleteChunk)
+	return utils.CoreDelete(context, s.metadataStorage, fileName, versionId, deleteChunk)
 }
 
 func (s *GCSStorage) GetLatestVersion(context context.Context, name string) (string, error) {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
-	fileData, err := database.GetData(s.boltdb, BucketFiles, name)
+	fileData, err := s.metadataStorage.GetData(context, CollectionFiles, name)
 	if err != nil {
 		return "", err
 	}
@@ -219,16 +241,22 @@ func (s *GCSStorage) CleanUp(context context.Context) {
 		return s.Client.Bucket(s.Bucket).Object(key).Delete(context)
 	}
 
-	utils.CoreCleanUp(s.boltdb, listFn, readFn, deleteFn)
+	utils.CoreCleanUp(context, s.metadataStorage, listFn, readFn, deleteFn)
 }
 
 func (s *GCSStorage) BackupMetadata(context context.Context, bucketMetadata string, bucketMetadataPath string) error {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
-	f, err := os.Open(filepath.Join(s.MetadataDirectoryPath, "boltdb.db"))
+
+	if s.MetadataType != "boltdb" {
+		return fmt.Errorf("backup metadata is only supported for local BoltDB")
+	}
+
+	f, err := os.Open(filepath.Join(s.MetadataURI, "boltdb.db"))
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	s.Client.Bucket(bucketMetadata).Create(context, s.ProjectId, nil)
 	wc := s.Client.Bucket(bucketMetadata).Object(bucketMetadataPath).NewWriter(context)
 	if _, err := io.Copy(wc, f); err != nil {
@@ -239,12 +267,12 @@ func (s *GCSStorage) BackupMetadata(context context.Context, bucketMetadata stri
 	return nil
 }
 
-func (s *GCSStorage) Close() error {
+func (s *GCSStorage) Close(context context.Context) error {
 	err := s.Client.Close()
 	if err != nil {
 		return err
 	}
-	err = s.boltdb.Close()
+	err = s.metadataStorage.Close(context)
 	if err != nil {
 		return err
 	}

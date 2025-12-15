@@ -11,48 +11,63 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/FraMan97/chunkmesh/internal/database"
+	boltdb_manager "github.com/FraMan97/chunkmesh/internal/database/boltdb"
+	mongodb_manager "github.com/FraMan97/chunkmesh/internal/database/mongodb"
 	"github.com/FraMan97/chunkmesh/internal/models"
 	"github.com/FraMan97/chunkmesh/internal/utils"
 	"github.com/FraMan97/chunkmesh/pkg"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/boltdb/bolt"
 )
 
 type S3StorageOptions struct {
-	BucketChunksPath      string
-	MetadataDirectoryPath string
-	AWSEndpoint           string
-	Bucket                string
-	Region                string
-	AvgChunkSize          int
+	BucketChunksPath string
+	MetadataURI      string
+	MetadataType     string
+	AWSEndpoint      string
+	Bucket           string
+	Region           string
+	AvgChunkSize     int
 }
 
 type S3Storage struct {
-	BucketChunksPath      string
-	MetadataDirectoryPath string
-	Endpoint              string
-	Bucket                string
-	Region                string
-	Client                *s3.Client
-	lock                  *sync.RWMutex
-	boltdb                *bolt.DB
-	AverageChunkSize      int
+	BucketChunksPath string
+	MetadataURI      string
+	Endpoint         string
+	Bucket           string
+	Region           string
+	Client           *s3.Client
+	lock             *sync.RWMutex
+	metadataStorage  models.MetadataStore
+	AverageChunkSize int
 }
 
 const (
-	BucketFiles    = "files"
-	BucketVersions = "versions"
-	BucketChunks   = "chunks"
+	CollectionFiles    = "files"
+	CollectionVersions = "versions"
+	CollectionChunks   = "chunks"
 )
+
+var MetadataTypes = []string{"boltdb", "mongodb"}
 
 func NewS3Storage(context context.Context, options *S3StorageOptions) (*S3Storage, error) {
 
-	db, err := database.OpenDatabase(options.MetadataDirectoryPath)
-	if err != nil {
-		return nil, err
+	var db models.MetadataStore
+	var err error
+	switch options.MetadataType {
+	case "boltdb":
+		db, err = boltdb_manager.OpenDatabase(options.MetadataURI)
+		if err != nil {
+			return nil, err
+		}
+	case "mongodb":
+		db, err = mongodb_manager.OpenDatabase(options.MetadataURI)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("metadata type %s not supported. Supported only '%v'", options.MetadataType, MetadataTypes)
 	}
 
 	cfg, err := config.LoadDefaultConfig(context,
@@ -70,24 +85,24 @@ func NewS3Storage(context context.Context, options *S3StorageOptions) (*S3Storag
 	})
 
 	storage := S3Storage{
-		BucketChunksPath:      options.BucketChunksPath,
-		MetadataDirectoryPath: options.MetadataDirectoryPath,
-		Endpoint:              options.AWSEndpoint,
-		Bucket:                options.Bucket,
-		Region:                options.Region,
-		Client:                client,
-		boltdb:                db,
-		lock:                  &sync.RWMutex{},
-		AverageChunkSize:      options.AvgChunkSize,
+		BucketChunksPath: options.BucketChunksPath,
+		MetadataURI:      options.MetadataURI,
+		Endpoint:         options.AWSEndpoint,
+		Bucket:           options.Bucket,
+		Region:           options.Region,
+		Client:           client,
+		metadataStorage:  db,
+		lock:             &sync.RWMutex{},
+		AverageChunkSize: options.AvgChunkSize,
 	}
 
 	storage.Client.CreateBucket(context, &s3.CreateBucketInput{
 		Bucket: aws.String(options.Bucket),
 	})
 
-	buckets := []string{BucketFiles, BucketVersions, BucketChunks}
-	for _, bucket := range buckets {
-		err = database.EnsureBucket(storage.boltdb, bucket)
+	collections := []string{CollectionFiles, CollectionVersions, CollectionChunks}
+	for _, collection := range collections {
+		err := storage.metadataStorage.EnsureCollection(context, collection)
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +135,7 @@ func (s *S3Storage) AddByPath(context context.Context, fileName string, filePath
 		}
 		return nil
 	}
-	return utils.CoreAdd(s.boltdb, fileName, s.AverageChunkSize, options, f, saveToBucket)
+	return utils.CoreAdd(context, s.metadataStorage, fileName, s.AverageChunkSize, options, f, saveToBucket)
 }
 
 func (s *S3Storage) AddByInfo(context context.Context, fileName string, data []byte, options *pkg.StoreObjectOptions) (string, error) {
@@ -144,7 +159,7 @@ func (s *S3Storage) AddByInfo(context context.Context, fileName string, data []b
 		}
 		return nil
 	}
-	return utils.CoreAdd(s.boltdb, fileName, s.AverageChunkSize, options, r, saveToBucket)
+	return utils.CoreAdd(context, s.metadataStorage, fileName, s.AverageChunkSize, options, r, saveToBucket)
 }
 
 func (s *S3Storage) Get(context context.Context, fileName string, versionIdRequested string, passphrase string, dst io.Writer) error {
@@ -166,7 +181,7 @@ func (s *S3Storage) Get(context context.Context, fileName string, versionIdReque
 		}
 		return data, nil
 	}
-	return utils.CoreGet(s.boltdb, s.lock, fileName, versionIdRequested, passphrase, getFromBucket, dst)
+	return utils.CoreGet(context, s.metadataStorage, s.lock, fileName, versionIdRequested, passphrase, getFromBucket, dst)
 }
 
 func (s *S3Storage) Delete(context context.Context, fileName string, versionId string) error {
@@ -184,13 +199,13 @@ func (s *S3Storage) Delete(context context.Context, fileName string, versionId s
 		}
 		return nil
 	}
-	return utils.CoreDelete(s.boltdb, fileName, versionId, deleteChunk)
+	return utils.CoreDelete(context, s.metadataStorage, fileName, versionId, deleteChunk)
 }
 
 func (s *S3Storage) GetLatestVersion(context context.Context, name string) (string, error) {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
-	fileData, err := database.GetData(s.boltdb, BucketFiles, name)
+	fileData, err := s.metadataStorage.GetData(context, CollectionFiles, name)
 	if err != nil {
 		return "", err
 	}
@@ -249,30 +264,35 @@ func (s *S3Storage) CleanUp(context context.Context) {
 		return err
 	}
 
-	utils.CoreCleanUp(s.boltdb, listFn, readFn, deleteFn)
+	utils.CoreCleanUp(context, s.metadataStorage, listFn, readFn, deleteFn)
 }
 
 func (s *S3Storage) BackupMetadata(context context.Context, bucketMetadata string, bucketMetadataPath string) error {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
+
+	if s.metadataStorage == nil || s.MetadataURI == "" || strings.HasPrefix(s.MetadataURI, "mongodb") {
+		return fmt.Errorf("backup metadata is only supported for local BoltDB, not MongoDB")
+	}
+
 	s.Client.CreateBucket(context, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketMetadata),
 	})
-	f, err := os.Open(filepath.Join(s.MetadataDirectoryPath, "boltdb.db"))
+
+	f, err := os.Open(filepath.Join(s.MetadataURI, "boltdb.db"))
 	if err != nil {
 		return err
 	}
+	defer f.Close()
+
 	_, err = s.Client.PutObject(context, &s3.PutObjectInput{
 		Bucket: aws.String(bucketMetadata),
 		Key:    aws.String(bucketMetadataPath),
 		Body:   f,
 	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
-func (s *S3Storage) Close() error {
-	return s.boltdb.Close()
+func (s *S3Storage) Close(context context.Context) error {
+	return s.metadataStorage.Close(context)
 }

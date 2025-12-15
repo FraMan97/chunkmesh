@@ -1,6 +1,7 @@
-package database
+package boltdb_manager
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,7 +9,11 @@ import (
 	"github.com/boltdb/bolt"
 )
 
-func OpenDatabase(path string) (*bolt.DB, error) {
+type BoltDBMetadataStorage struct {
+	db *bolt.DB
+}
+
+func OpenDatabase(path string) (*BoltDBMetadataStorage, error) {
 	err := os.MkdirAll(path, 0700)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the bolt database folder '%s'", path)
@@ -17,11 +22,14 @@ func OpenDatabase(path string) (*bolt.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open the bolt database in the folder '%s'", path)
 	}
-	return db, nil
+
+	return &BoltDBMetadataStorage{
+		db: db,
+	}, nil
 }
 
-func EnsureBucket(db *bolt.DB, bucketName string) error {
-	return db.Update(func(tx *bolt.Tx) error {
+func (b *BoltDBMetadataStorage) EnsureCollection(context context.Context, bucketName string) error {
+	return b.db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists([]byte(bucketName))
 		if err != nil {
 			return fmt.Errorf("failed to create if not exists the bucket '%s'", bucketName)
@@ -30,10 +38,10 @@ func EnsureBucket(db *bolt.DB, bucketName string) error {
 	})
 }
 
-func GetData(db *bolt.DB, bucketName string, key string) ([]byte, error) {
+func (b *BoltDBMetadataStorage) GetData(context context.Context, bucketName string, key string) ([]byte, error) {
 	var value []byte
 
-	err := db.View(func(tx *bolt.Tx) error {
+	err := b.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return fmt.Errorf("bucket '%s' not found", bucketName)
@@ -56,8 +64,8 @@ func GetData(db *bolt.DB, bucketName string, key string) ([]byte, error) {
 	return value, nil
 }
 
-func PutData(db *bolt.DB, bucketName string, key string, data []byte) error {
-	return db.Update(func(tx *bolt.Tx) error {
+func (b *BoltDBMetadataStorage) PutData(context context.Context, bucketName string, key string, data []byte) error {
+	return b.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return fmt.Errorf("bucket '%s' not found", bucketName)
@@ -70,8 +78,8 @@ func PutData(db *bolt.DB, bucketName string, key string, data []byte) error {
 	})
 }
 
-func DeleteKey(db *bolt.DB, bucketName string, key string) error {
-	return db.Update(func(tx *bolt.Tx) error {
+func (b *BoltDBMetadataStorage) DeleteKey(context context.Context, bucketName string, key string) error {
+	return b.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return fmt.Errorf("bucket '%s' not found", bucketName)
@@ -84,10 +92,10 @@ func DeleteKey(db *bolt.DB, bucketName string, key string) error {
 	})
 }
 
-func ExistsKey(db *bolt.DB, bucketName string, key string) (bool, error) {
+func (b *BoltDBMetadataStorage) ExistsKey(context context.Context, bucketName string, key string) (bool, error) {
 	found := false
 
-	err := db.View(func(tx *bolt.Tx) error {
+	err := b.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return fmt.Errorf("bucket '%s' not found", bucketName)
@@ -104,10 +112,10 @@ func ExistsKey(db *bolt.DB, bucketName string, key string) (bool, error) {
 	return found, err
 }
 
-func GetAllData(db *bolt.DB, bucketName string) (map[string][]byte, error) {
+func (b *BoltDBMetadataStorage) GetAllData(context context.Context, bucketName string) (map[string][]byte, error) {
 	values := make(map[string][]byte)
 
-	err := db.View(func(tx *bolt.Tx) error {
+	err := b.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return fmt.Errorf("bucket '%s' not found in DB", bucketName)
@@ -130,10 +138,10 @@ func GetAllData(db *bolt.DB, bucketName string) (map[string][]byte, error) {
 	return values, nil
 }
 
-func GetAllKeys(db *bolt.DB, bucketName string) ([]string, error) {
+func (b *BoltDBMetadataStorage) GetAllKeys(context context.Context, bucketName string) ([]string, error) {
 	values := []string{}
 
-	err := db.View(func(tx *bolt.Tx) error {
+	err := b.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return fmt.Errorf("bucket '%s' not found", bucketName)
@@ -151,4 +159,8 @@ func GetAllKeys(db *bolt.DB, bucketName string) ([]string, error) {
 	}
 
 	return values, nil
+}
+
+func (b *BoltDBMetadataStorage) Close(context context.Context) error {
+	return b.db.Close()
 }

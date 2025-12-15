@@ -3,6 +3,7 @@
 ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 ![BoltDB](https://img.shields.io/badge/BoltDB-BB3333?style=for-the-badge&logo=google-cloud&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB-47A248?style=for-the-badge&logo=mongodb&logoColor=white)
 ![AWS S3](https://img.shields.io/badge/AWS%20S3-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)
 ![Google Cloud](https://img.shields.io/badge/Google%20Cloud-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)
 ![License](https://img.shields.io/badge/License-GNU_AGPL_v3-blue?style=for-the-badge&logo=gnu&logoColor=white)
@@ -26,20 +27,22 @@ Built to support **Local Filesystem**, **AWS S3**, and **Google Cloud Storage (G
 
 ## Key Features
 
-* **Hybrid Backend Support**: Seamlessly store data across Local Filesystems, AWS S3, and Google Cloud Storage while keeping metadata fast and local.
+* **Hybrid Backend Support**: Seamlessly store data across Local Filesystems, AWS S3, and Google Cloud Storage.
+* **Flexible Metadata Storage**: Choose between embedded speed (**BoltDB**) for single-node setups or scalable, distributed metadata management (**MongoDB**) for clustered environments.
 * **Content-Defined Deduplication**: Uses the **FastCDC** algorithm to split files into variable-size chunks. This ensures that minor insertions or shifts only affect local chunks, maximizing deduplication efficiency and minimizing cloud egress/ingress.
 * **Data Integrity Assurance**: Automatically performs SHA-256 integrity checks during retrieval to detect silent data corruption.
 * **AES Encryption**: Supports optional AES-256 (GCM) client-side encryption. Chunks are encrypted before being written to disk or uploaded to the cloud.
 * **Retention Policy**: Supports optional Time-to-Live (TTL). Expired versions are automatically purged during cleanup.
 * **Stream-Based Processing**: Built around `io.Reader`, enabling processing of large files with constant, minimal RAM usage.
-* **Atomic State Management**: Metadata is managed via a transactional local Key/Value store (BoltDB).
 
 ---
 
 ## Technology Stack
 
 * **Core Language**: Go (Golang) v1.24+
-* **Metadata Store**: Embedded Key/Value store (BoltDB) for file registry, version trees, and chunk reference counting.
+* **Metadata Store**: 
+    * **BoltDB**: Embedded Key/Value store for local, file-based registries.
+    * **MongoDB**: Document-oriented database for distributed metadata management.
 * **Blob Storage**:
     * **Local**: Sharded directory structure for efficient file organization (e.g., `chunks/ab/cd/...`).
     * **S3/GCS**: Object storage buckets with content-addressable keys.
@@ -51,12 +54,13 @@ Built to support **Local Filesystem**, **AWS S3**, and **Google Cloud Storage (G
 > [!NOTE]
 > ### Prerequisites
 > * Go (v 1.24 or later).
+> * A running MongoDB instance (if selecting `mongodb` as metadata type).
 
 ### 1. How to Use
 
-**Initialization (Select a Provider)**
+**Initialization**
 
-You can initialize the storage using one of the available providers (`local`, `s3`, `gcs`).
+You can initialize the storage using one of the available providers (`local`, `s3`, `gcs`) and choose your preferred metadata backend (`boltdb` or `mongodb`).
 
 ```go
 import (
@@ -70,29 +74,47 @@ import (
 func main() {
     ctx := context.Background()
     avgChunkSize := 5000 // Target average chunk size in bytes
+    
+    // --- Metadata Configuration Examples ---
+    
+    // 1. Using BoltDB (Local file)
+    // metadataType := "boltdb"
+    // metadataURI  := "/path/to/local/metadata_folder"
+
+    // 2. Using MongoDB (Distributed)
+    metadataType := "mongodb"
+    metadataURI  := "mongodb://user:password@localhost:27017/my_chunkmesh_db"
+
+
+    // --- Storage Provider Examples ---
 
     // Option A: Local Storage
     store, _ := local.NewLocalStorage(ctx, &local.LocalStorageOptions{
-        MetadataDirectoryPath: "/path/to/local",
-        BucketChunksPath: "/database/chunks",
-        AvgChunkSize:          avgChunkSize,
+        MetadataURI:      metadataURI,
+        MetadataType:     metadataType,
+        ChunksPath:       "/database/chunks_storage",
+        AvgChunkSize:     avgChunkSize,
     })
 
     // Option B: AWS S3
     store, _ := s3store.NewS3Storage(ctx, &s3store.S3StorageOptions{
         Bucket:           "my-bucket",
         Region:           "us-east-1",
-        MetadataDirectoryPath: "/path/to/local",
-        BucketChunksPath: "/database/chunks",
+        MetadataURI:      metadataURI,
+        MetadataType:     metadataType,
+        BucketChunksPath: "chunks", // Prefix inside the bucket
         AvgChunkSize:     avgChunkSize,
+        // AWSEndpoint:    "http://localhost:9000", // Optional: for MinIO/LocalStack
      })
     
     // Option C: Google Cloud Storage
     store, _ := gcs.NewGCSStorage(ctx, &gcs.GCSStorageOptions{
         Bucket:           "my-gcs-bucket",
         ProjectId:        "my-project-id",
-        MetadataDirectoryPath: "/path/to/local",
-        BucketChunksPath: "/database/chunks",
+        Region:           "us-east-1",
+        MetadataURI:      metadataURI,
+        MetadataType:     metadataType,
+        BucketChunksPath: "chunks",
         AvgChunkSize:     avgChunkSize,
      })
 }
@@ -162,7 +184,7 @@ if err != nil {
 store.CleanUp(ctx)
 
 ```
-**Backup (Cloud only)**
+**Backup (Cloud only and boltDB metadata)**
 
 
 ```go
@@ -176,6 +198,5 @@ if err != nil {
 
 ## Road Map
 
-* [] Add MongoDB as metadata database support
 * [] Add Postgresql as metadata database support
 * [] Add Azure as cloud storage support

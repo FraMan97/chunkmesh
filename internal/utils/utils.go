@@ -3,6 +3,7 @@ package utils
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -17,18 +18,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/FraMan97/chunkmesh/internal/database"
 	"github.com/FraMan97/chunkmesh/internal/models"
 	"github.com/FraMan97/chunkmesh/pkg"
-	"github.com/boltdb/bolt"
 	"github.com/google/uuid"
 	"github.com/jotfs/fastcdc-go"
 )
 
 const (
-	BucketFiles    = "files"
-	BucketVersions = "versions"
-	BucketChunks   = "chunks"
+	CollectionFiles    = "files"
+	CollectionVersions = "versions"
+	CollectionChunks   = "chunks"
 )
 
 func GenerateHash(data []byte) string {
@@ -209,10 +208,10 @@ func DeriveKey(passphrase string) []byte {
 	return hash[:]
 }
 
-func CoreAdd(db *bolt.DB, name string, averageChunkSize int,
+func CoreAdd(context context.Context, db models.MetadataStore, name string, averageChunkSize int,
 	options *pkg.StoreObjectOptions, reader io.Reader, saveChunkFn func(chunkId string, data []byte) error) (string, error) {
 	var currentFile models.File
-	fileData, err := database.GetData(db, BucketFiles, name)
+	fileData, err := db.GetData(context, CollectionFiles, name)
 
 	versionId := uuid.New().String()
 
@@ -267,7 +266,7 @@ func CoreAdd(db *bolt.DB, name string, averageChunkSize int,
 		chunkId := GenerateHash(processedData)
 
 		mu.Lock()
-		chunkData, err := database.GetData(db, BucketChunks, chunkId)
+		chunkData, err := db.GetData(context, CollectionChunks, chunkId)
 		exists := (err == nil && chunkData != nil)
 		mu.Unlock()
 
@@ -280,7 +279,7 @@ func CoreAdd(db *bolt.DB, name string, averageChunkSize int,
 		mu.Lock()
 		defer mu.Unlock()
 
-		chunkData, err = database.GetData(db, BucketChunks, chunkId)
+		chunkData, err = db.GetData(context, CollectionChunks, chunkId)
 		exists = (err == nil && chunkData != nil)
 
 		var currentChunk models.Chunk
@@ -302,7 +301,7 @@ func CoreAdd(db *bolt.DB, name string, averageChunkSize int,
 		if err != nil {
 			return err
 		}
-		if err := database.PutData(db, BucketChunks, chunkId, chunkBytes); err != nil {
+		if err := db.PutData(context, CollectionChunks, chunkId, chunkBytes); err != nil {
 			return err
 		}
 
@@ -329,7 +328,7 @@ func CoreAdd(db *bolt.DB, name string, averageChunkSize int,
 	if err != nil {
 		return "", err
 	}
-	if err := database.PutData(db, BucketVersions, versionId, versionBytes); err != nil {
+	if err := db.PutData(context, CollectionVersions, versionId, versionBytes); err != nil {
 		return "", err
 	}
 
@@ -337,18 +336,18 @@ func CoreAdd(db *bolt.DB, name string, averageChunkSize int,
 	if err != nil {
 		return "", err
 	}
-	if err := database.PutData(db, BucketFiles, name, fileMetaBytes); err != nil {
+	if err := db.PutData(context, CollectionFiles, name, fileMetaBytes); err != nil {
 		return "", err
 	}
 
 	return versionId, nil
 }
 
-func CoreGet(db *bolt.DB, lock *sync.RWMutex, fileName string, versionIdRequested string, key string, getFromStorage func(chunkId string) ([]byte, error), dst io.Writer) error {
+func CoreGet(context context.Context, db models.MetadataStore, lock *sync.RWMutex, fileName string, versionIdRequested string, key string, getFromStorage func(chunkId string) ([]byte, error), dst io.Writer) error {
 	lock.RLock()
 	defer lock.RUnlock()
 
-	fileData, err := database.GetData(db, BucketFiles, fileName)
+	fileData, err := db.GetData(context, CollectionFiles, fileName)
 	if err != nil || fileData == nil {
 		return fmt.Errorf("file '%s' not found", fileName)
 	}
@@ -364,7 +363,7 @@ func CoreGet(db *bolt.DB, lock *sync.RWMutex, fileName string, versionIdRequeste
 		finalVersionID = versionIdRequested
 	}
 
-	versionData, err := database.GetData(db, BucketVersions, finalVersionID)
+	versionData, err := db.GetData(context, CollectionVersions, finalVersionID)
 	if err != nil || versionData == nil {
 		return fmt.Errorf("version '%s' not found", finalVersionID)
 	}
@@ -374,7 +373,7 @@ func CoreGet(db *bolt.DB, lock *sync.RWMutex, fileName string, versionIdRequeste
 	}
 
 	for i, chunkID := range targetVersion.Chunks {
-		chunkMetaBytes, err := database.GetData(db, BucketChunks, chunkID)
+		chunkMetaBytes, err := db.GetData(context, CollectionChunks, chunkID)
 		if err != nil || chunkMetaBytes == nil {
 			return fmt.Errorf("chunk '%s' (index %d) not found in DB", chunkID, i)
 		}
@@ -415,8 +414,8 @@ func CoreGet(db *bolt.DB, lock *sync.RWMutex, fileName string, versionIdRequeste
 	return nil
 }
 
-func CoreDelete(db *bolt.DB, fileName string, versionId string, deleteChunkFn func(chunkId string) error) error {
-	fileData, err := database.GetData(db, BucketFiles, fileName)
+func CoreDelete(context context.Context, db models.MetadataStore, fileName string, versionId string, deleteChunkFn func(chunkId string) error) error {
+	fileData, err := db.GetData(context, CollectionFiles, fileName)
 	if err != nil {
 		return fmt.Errorf("file '%s' not found", fileName)
 	}
@@ -428,7 +427,7 @@ func CoreDelete(db *bolt.DB, fileName string, versionId string, deleteChunkFn fu
 		idVersion = targetFile.LastVersion
 	}
 
-	vData, err := database.GetData(db, BucketVersions, idVersion)
+	vData, err := db.GetData(context, CollectionVersions, idVersion)
 	if err != nil {
 		return fmt.Errorf("version '%s' not found", idVersion)
 	}
@@ -436,7 +435,7 @@ func CoreDelete(db *bolt.DB, fileName string, versionId string, deleteChunkFn fu
 	json.Unmarshal(vData, &targetVersion)
 
 	for _, chunkID := range targetVersion.Chunks {
-		cData, err := database.GetData(db, BucketChunks, chunkID)
+		cData, err := db.GetData(context, CollectionChunks, chunkID)
 		if err != nil {
 			continue
 		}
@@ -449,10 +448,10 @@ func CoreDelete(db *bolt.DB, fileName string, versionId string, deleteChunkFn fu
 			if err = deleteChunkFn(chunkMeta.Id); err != nil {
 				return err
 			}
-			database.DeleteKey(db, BucketChunks, chunkID)
+			db.DeleteKey(context, CollectionChunks, chunkID)
 		} else {
 			updatedCData, _ := json.Marshal(chunkMeta)
-			database.PutData(db, BucketChunks, chunkID, updatedCData)
+			db.PutData(context, CollectionChunks, chunkID, updatedCData)
 		}
 	}
 
@@ -473,19 +472,20 @@ func CoreDelete(db *bolt.DB, fileName string, versionId string, deleteChunkFn fu
 	}
 
 	if len(targetFile.Versions) == 0 {
-		database.DeleteKey(db, BucketFiles, fileName)
+		db.DeleteKey(context, CollectionFiles, fileName)
 	} else {
 		updatedFData, _ := json.Marshal(targetFile)
-		database.PutData(db, BucketFiles, fileName, updatedFData)
+		db.PutData(context, CollectionFiles, fileName, updatedFData)
 	}
 
-	database.DeleteKey(db, BucketVersions, idVersion)
+	db.DeleteKey(context, CollectionVersions, idVersion)
 
 	return nil
 }
 
 func CoreCleanUp(
-	db *bolt.DB,
+	context context.Context,
+	db models.MetadataStore,
 	listPhysicalChunksFn func() ([]string, error),
 	readChunkFn func(chunkId string) ([]byte, error),
 	deleteChunkFn func(chunkId string) error,
@@ -495,17 +495,17 @@ func CoreCleanUp(
 	if err == nil {
 		for _, chunkID := range physicalChunkIds {
 
-			exists, _ := database.ExistsKey(db, BucketChunks, chunkID)
+			exists, _ := db.ExistsKey(context, CollectionChunks, chunkID)
 			if !exists {
 				_ = deleteChunkFn(chunkID)
 			} else {
-				cData, err := database.GetData(db, BucketChunks, chunkID)
+				cData, err := db.GetData(context, CollectionChunks, chunkID)
 				if err == nil {
 					var c models.Chunk
 					if err := json.Unmarshal(cData, &c); err == nil {
 						if c.RefCount <= 0 {
 							if err := deleteChunkFn(chunkID); err == nil {
-								_ = database.DeleteKey(db, BucketChunks, chunkID)
+								_ = db.DeleteKey(context, CollectionChunks, chunkID)
 							}
 						}
 					}
@@ -514,7 +514,7 @@ func CoreCleanUp(
 		}
 	}
 
-	vData, err := database.GetAllData(db, BucketVersions)
+	vData, err := db.GetAllData(context, CollectionVersions)
 	if err != nil {
 		return err
 	}
@@ -552,7 +552,7 @@ func CoreCleanUp(
 			}
 		}
 		if shouldDelete {
-			_ = CoreDelete(db, v.FileName, v.Id, deleteChunkFn)
+			_ = CoreDelete(context, db, v.FileName, v.Id, deleteChunkFn)
 		}
 	}
 
